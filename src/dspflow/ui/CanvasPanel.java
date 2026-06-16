@@ -1,0 +1,1024 @@
+package dspflow.ui;
+
+import java.awt.*;
+import java.awt.event.*;
+import java.awt.geom.*;
+import java.util.*;
+import java.util.List;
+import javax.swing.*;
+
+import dspflow.model.*;
+import dspflow.model.blocks.ScopeSink;
+import dspflow.model.blocks.SpectrumSink;
+
+/**
+ * The schematic editor.
+ *
+ * Interactions:
+ *   - pick a block in the palette, click the canvas to place (Shift = stamp several)
+ *   - drag from a port to another port to wire (input/output in either order)
+ *   - left-drag a block to move (snaps to grid); left-drag empty space = rubber-band select
+ *   - right/middle-drag = pan; Ctrl + wheel = zoom; wheel = scroll
+ *   - Delete removes selection; Esc cancels wiring/placement
+ *   - double-click: properties (sinks open their viewer; use right-click > Properties)
+ */
+public class CanvasPanel extends JPanel {
+    public final Diagram diagram;
+    private final MainFrame frame;
+
+    private double scale = 1.0, tx = 40, ty = 40;
+    private String placing = null;
+    private Port wireFrom = null;
+    private Port hoverPort = null;
+    private Point2D mouseModel = new Point2D.Double();
+    private final Set<Object> selection = new LinkedHashSet<>();
+
+    private Point lastScreen;
+    private boolean panning = false, panned = false;
+    private boolean movingBlocks = false;
+    private Point2D pressModel;
+    private final Map<Block, Point> moveStart = new HashMap<>();
+    private Rectangle2D rubber = null;
+
+    // Wire segment dragging state
+    private Wire draggingWire = null;
+    private int draggingSegment = -1;  // index of segment being dragged
+    private boolean segmentHorizontal = false;
+    private Point2D segmentDragStart = null;
+
+    // Clipboard for copy/paste
+    private static class ClipboardEntry {
+        String type;
+        int dx, dy;  // offset from first block
+        Map<String, String> params;
+    }
+    private static class ClipboardWire {
+        int srcIdx, dstIdx;
+        String srcPort, dstPort;
+        List<Point> waypoints;
+    }
+    private List<ClipboardEntry> clipboard = new ArrayList<>();
+    private List<ClipboardWire> clipboardWires = new ArrayList<>();
+
+    private static final Color BG = new Color(0xF6F7F9);
+    private static final Color GRID = new Color(0xE2E5EA);
+    private static final Color WIRE = new Color(0x4A7A6F);
+    private static final Color SEL = new Color(0xE8861A);
+    private static final Color BORDER = new Color(0x7A8290);
+
+    // Display toggles
+    private boolean showNetNames = false;
+    private boolean showBlockNames = false;
+    private boolean showBitWidths = true;
+
+    public void setShowNetNames(boolean v) { showNetNames = v; repaint(); }
+    public void setShowBlockNames(boolean v) { showBlockNames = v; repaint(); }
+    public void setShowBitWidths(boolean v) { showBitWidths = v; repaint(); }
+
+    public CanvasPanel(MainFrame frame, Diagram diagram) {
+        this.frame = frame;
+        this.diagram = diagram;
+        setBackground(BG);
+        setFocusable(true);
+
+        MouseAdapter ma = new MouseAdapter() {
+            @Override public void mousePressed(MouseEvent e) { CanvasPanel.this.mousePressed(e); }
+            @Override public void mouseReleased(MouseEvent e) { CanvasPanel.this.mouseReleased(e); }
+            @Override public void mouseDragged(MouseEvent e) { CanvasPanel.this.mouseDragged(e); }
+            @Override public void mouseMoved(MouseEvent e) { CanvasPanel.this.mouseMoved(e); }
+            @Override public void mouseClicked(MouseEvent e) { CanvasPanel.this.mouseClicked(e); }
+            @Override public void mouseWheelMoved(MouseWheelEvent e) { CanvasPanel.this.wheel(e); }
+        };
+        addMouseListener(ma);
+        addMouseMotionListener(ma);
+        addMouseWheelListener(ma);
+
+        InputMap im = getInputMap(WHEN_FOCUSED);
+        ActionMap am = getActionMap();
+        im.put(KeyStroke.getKeyStroke(KeyEvent.VK_DELETE, 0), "del");
+        im.put(KeyStroke.getKeyStroke(KeyEvent.VK_BACK_SPACE, 0), "del");
+        am.put("del", new AbstractAction() {
+            public void actionPerformed(ActionEvent e) { deleteSelection(); }
+        });
+        im.put(KeyStroke.getKeyStroke(KeyEvent.VK_ESCAPE, 0), "esc");
+        am.put("esc", new AbstractAction() {
+            public void actionPerformed(ActionEvent e) {
+                wireFrom = null;
+                frame.clearPlacing();
+                repaint();
+            }
+        });
+        im.put(KeyStroke.getKeyStroke(KeyEvent.VK_C, InputEvent.CTRL_DOWN_MASK), "copy");
+        am.put("copy", new AbstractAction() {
+            public void actionPerformed(ActionEvent e) { copySelection(); }
+        });
+        im.put(KeyStroke.getKeyStroke(KeyEvent.VK_V, InputEvent.CTRL_DOWN_MASK), "paste");
+        am.put("paste", new AbstractAction() {
+            public void actionPerformed(ActionEvent e) { paste(); }
+        });
+        im.put(KeyStroke.getKeyStroke(KeyEvent.VK_R, 0), "rotate");
+        am.put("rotate", new AbstractAction() {
+            public void actionPerformed(ActionEvent e) { rotateSelection(); }
+        });
+        im.put(KeyStroke.getKeyStroke(KeyEvent.VK_H, 0), "flipH");
+        am.put("flipH", new AbstractAction() {
+            public void actionPerformed(ActionEvent e) { flipSelectionH(); }
+        });
+        im.put(KeyStroke.getKeyStroke(KeyEvent.VK_V, 0), "flipV");
+        am.put("flipV", new AbstractAction() {
+            public void actionPerformed(ActionEvent e) { flipSelectionV(); }
+        });
+    }
+
+    // ---- coordinate helpers --------------------------------------------
+
+    private Point2D toModel(Point p) {
+        return new Point2D.Double((p.x - tx) / scale, (p.y - ty) / scale);
+    }
+
+    private static int snap(double v) { return (int) Math.round(v / 10) * 10; }
+
+    public void setPlacing(String type) {
+        placing = type;
+        setCursor(Cursor.getPredefinedCursor(
+                type != null ? Cursor.CROSSHAIR_CURSOR : Cursor.DEFAULT_CURSOR));
+    }
+
+    public void resetView() { scale = 1; tx = 40; ty = 40; repaint(); }
+
+    public void clearSelection() { selection.clear(); repaint(); }
+
+    // ---- hit tests ------------------------------------------------------
+
+    public Point portPos(Port p) {
+        Block b = p.block;
+        // Determine base edge: 0=left, 1=top, 2=right, 3=bottom
+        int edge;
+        int idx, count;
+        if (p.input) {
+            if (p.isCE()) {
+                edge = 3; // CE always starts at bottom
+                idx = 0; count = 1;
+            } else {
+                edge = 0; // inputs start at left
+                List<Port> ins = new ArrayList<>();
+                for (Port q : b.inputs) if (!q.isCE()) ins.add(q);
+                idx = ins.indexOf(p);
+                count = ins.size();
+            }
+        } else {
+            edge = 2; // outputs start at right
+            idx = b.outputs.indexOf(p);
+            count = b.outputs.size();
+        }
+
+        // Apply rotation (clockwise)
+        edge = (edge + b.rotation) % 4;
+
+        // Apply horizontal flip (swaps left/right)
+        if (b.flipH) {
+            if (edge == 0) edge = 2;
+            else if (edge == 2) edge = 0;
+        }
+
+        // Apply vertical flip (swaps top/bottom)
+        if (b.flipV) {
+            if (edge == 1) edge = 3;
+            else if (edge == 3) edge = 1;
+        }
+
+        // Compute position on edge
+        return posOnEdge(b, edge, idx, count);
+    }
+
+    private Point posOnEdge(Block b, int edge, int idx, int count) {
+        int frac = (idx + 1) * (edge % 2 == 0 ? b.h : b.w) / (count + 1);
+        switch (edge) {
+            case 0: return new Point(b.x, b.y + frac);           // left
+            case 1: return new Point(b.x + frac, b.y);           // top
+            case 2: return new Point(b.x + b.w, b.y + frac);     // right
+            case 3: return new Point(b.x + frac, b.y + b.h);     // bottom
+            default: return new Point(b.x, b.y);
+        }
+    }
+
+    private Port portAt(double mx, double my) {
+        double r = Math.max(7, 7 / scale);
+        for (int i = diagram.blocks.size() - 1; i >= 0; i--) {
+            Block b = diagram.blocks.get(i);
+            for (Port p : b.inputs) if (portPos(p).distance(mx, my) <= r) return p;
+            for (Port p : b.outputs) if (portPos(p).distance(mx, my) <= r) return p;
+        }
+        return null;
+    }
+
+    private Block blockAt(double mx, double my) {
+        for (int i = diagram.blocks.size() - 1; i >= 0; i--) {
+            Block b = diagram.blocks.get(i);
+            if (mx >= b.x && mx <= b.x + b.w && my >= b.y && my <= b.y + b.h) return b;
+        }
+        return null;
+    }
+
+    private Wire wireAt(double mx, double my) {
+        double tol = Math.max(5, 5 / scale);
+        for (Wire w : diagram.wires) {
+            List<Point2D> pts = route(w);
+            for (int i = 0; i + 1 < pts.size(); i++) {
+                if (Line2D.ptSegDist(pts.get(i).getX(), pts.get(i).getY(),
+                        pts.get(i + 1).getX(), pts.get(i + 1).getY(), mx, my) <= tol)
+                    return w;
+            }
+        }
+        return null;
+    }
+
+    // ---- wire routing (simple orthogonal) --------------------------------
+
+    private List<Point2D> route(Wire w) {
+        if (w.hasCustomRoute()) {
+            return routeWithWaypoints(w);
+        }
+        return routeAuto(portPos(w.src), portPos(w.dst), w.dst.isCE());
+    }
+
+    /** Route using explicit waypoints - ensures orthogonal segments. */
+    private List<Point2D> routeWithWaypoints(Wire w) {
+        List<Point2D> keyPts = new ArrayList<>();
+        Point a0 = portPos(w.src);
+        Point b0 = portPos(w.dst);
+
+        keyPts.add(new Point2D.Double(a0.x, a0.y));
+        for (Point wp : w.waypoints) {
+            keyPts.add(new Point2D.Double(wp.x, wp.y));
+        }
+        keyPts.add(new Point2D.Double(b0.x, b0.y));
+
+        // Build result with orthogonal connections
+        List<Point2D> result = new ArrayList<>();
+        result.add(keyPts.get(0));
+        for (int i = 0; i < keyPts.size() - 1; i++) {
+            Point2D p1 = keyPts.get(i);
+            Point2D p2 = keyPts.get(i + 1);
+            // If not aligned, insert corner point (horizontal first)
+            if (p1.getX() != p2.getX() && p1.getY() != p2.getY()) {
+                result.add(new Point2D.Double(p2.getX(), p1.getY()));
+            }
+            result.add(p2);
+        }
+        return result;
+    }
+
+    /** Auto-route (original algorithm). */
+    private List<Point2D> routeAuto(Point a0, Point b0, boolean dstBottom) {
+        List<Point2D> pts = new ArrayList<>();
+        Point2D a1 = new Point2D.Double(a0.x + 14, a0.y);
+        pts.add(new Point2D.Double(a0.x, a0.y));
+        pts.add(a1);
+        if (dstBottom) {
+            Point2D b1 = new Point2D.Double(b0.x, b0.y + 16);
+            if (b1.getY() >= a1.getY()) {
+                pts.add(new Point2D.Double(b1.getX(), a1.getY()));
+            } else {
+                double midx = (a1.getX() + b1.getX()) / 2;
+                pts.add(new Point2D.Double(midx, a1.getY()));
+                pts.add(new Point2D.Double(midx, b1.getY() + 14));
+                pts.add(new Point2D.Double(b1.getX(), b1.getY() + 14));
+            }
+            pts.add(b1);
+            pts.add(new Point2D.Double(b0.x, b0.y));
+        } else {
+            Point2D b1 = new Point2D.Double(b0.x - 14, b0.y);
+            if (b1.getX() >= a1.getX()) {
+                double midx = (a1.getX() + b1.getX()) / 2;
+                pts.add(new Point2D.Double(midx, a1.getY()));
+                pts.add(new Point2D.Double(midx, b1.getY()));
+            } else {
+                double midy = (a1.getY() + b1.getY()) / 2;
+                pts.add(new Point2D.Double(a1.getX(), midy));
+                pts.add(new Point2D.Double(b1.getX(), midy));
+            }
+            pts.add(b1);
+            pts.add(new Point2D.Double(b0.x, b0.y));
+        }
+        return pts;
+    }
+
+    /** Convert auto-route to explicit waypoints for editing. */
+    private void bakeWaypoints(Wire w) {
+        if (w.hasCustomRoute()) return;
+        List<Point2D> pts = routeAuto(portPos(w.src), portPos(w.dst), w.dst.isCE());
+        w.waypoints.clear();
+        // Skip first (src port) and last (dst port) - store intermediate points
+        for (int i = 1; i < pts.size() - 1; i++) {
+            Point2D p = pts.get(i);
+            w.waypoints.add(new Point(snap((int) p.getX()), snap((int) p.getY())));
+        }
+    }
+
+    /** Find which segment of a wire is at given point. Returns -1 if none. */
+    private int segmentAt(Wire w, double mx, double my) {
+        double tol = Math.max(5, 5 / scale);
+        List<Point2D> pts = route(w);
+        for (int i = 0; i + 1 < pts.size(); i++) {
+            if (Line2D.ptSegDist(pts.get(i).getX(), pts.get(i).getY(),
+                    pts.get(i + 1).getX(), pts.get(i + 1).getY(), mx, my) <= tol)
+                return i;
+        }
+        return -1;
+    }
+
+    /** Check if segment is horizontal (vs vertical). */
+    private boolean isHorizontal(List<Point2D> pts, int seg) {
+        if (seg < 0 || seg + 1 >= pts.size()) return false;
+        double dy = Math.abs(pts.get(seg + 1).getY() - pts.get(seg).getY());
+        double dx = Math.abs(pts.get(seg + 1).getX() - pts.get(seg).getX());
+        return dx > dy;
+    }
+
+    // ---- mouse logic ------------------------------------------------------
+
+    private void mousePressed(MouseEvent e) {
+        requestFocusInWindow();
+        Point2D m = toModel(e.getPoint());
+        mouseModel = m;
+        lastScreen = e.getPoint();
+        panned = false;
+
+        boolean left = SwingUtilities.isLeftMouseButton(e);
+        boolean right = SwingUtilities.isRightMouseButton(e);
+        boolean middle = SwingUtilities.isMiddleMouseButton(e);
+
+        // Middle always pans
+        if (middle) {
+            panning = true;
+            return;
+        }
+
+        // Placing mode: left click places block
+        if (placing != null && left) {
+            Block b = BlockLibrary.create(placing);
+            if (b != null) {
+                b.x = snap(m.getX() - b.w / 2.0);
+                b.y = snap(m.getY() - b.h / 2.0);
+                diagram.add(b);
+                frame.setStatus("Placed " + b.label() + ".");
+            }
+            if (!e.isShiftDown()) frame.clearPlacing();
+            repaint();
+            return;
+        }
+
+        // Left click on port: start wiring
+        Port p = portAt(m.getX(), m.getY());
+        if (p != null && left) {
+            wireFrom = p;
+            repaint();
+            return;
+        }
+
+        // Left click on wire: drag segment or select
+        Wire w = wireAt(m.getX(), m.getY());
+        if (w != null && left) {
+            // Alt+click: reset to auto-routing
+            if (e.isAltDown()) {
+                w.clearWaypoints();
+                selection.clear();
+                selection.add(w);
+                frame.setStatus("Wire reset to auto-routing.");
+                repaint();
+                return;
+            }
+            int seg = segmentAt(w, m.getX(), m.getY());
+            if (seg >= 0 && !e.isControlDown()) {
+                // Start segment drag - first bake waypoints if auto-routed
+                bakeWaypoints(w);
+                List<Point2D> pts = route(w);
+                draggingWire = w;
+                draggingSegment = seg;
+                segmentHorizontal = isHorizontal(pts, seg);
+                segmentDragStart = m;
+                selection.clear();
+                selection.add(w);
+                repaint();
+                return;
+            }
+            if (!e.isControlDown()) selection.clear();
+            selection.add(w);
+            repaint();
+            return;
+        }
+
+        // Left click on block: select/drag
+        Block b = blockAt(m.getX(), m.getY());
+        if (b != null && left) {
+            if (e.isControlDown()) {
+                if (!selection.remove(b)) selection.add(b);
+            } else if (!selection.contains(b)) {
+                selection.clear();
+                selection.add(b);
+            }
+            movingBlocks = true;
+            pressModel = m;
+            moveStart.clear();
+            for (Object o : selection) {
+                if (o instanceof Block) {
+                    Block blk = (Block) o;
+                    moveStart.put(blk, new Point(blk.x, blk.y));
+                }
+            }
+            repaint();
+            return;
+        }
+
+        // Left on empty: pan
+        if (left) {
+            panning = true;
+            return;
+        }
+
+        // Right on empty: rubber-band selection (context menu on release if no drag)
+        if (right) {
+            if (!e.isControlDown()) selection.clear();
+            pressModel = m;
+            rubber = new Rectangle2D.Double(m.getX(), m.getY(), 0, 0);
+            repaint();
+        }
+    }
+
+    private void mouseDragged(MouseEvent e) {
+        Point2D m = toModel(e.getPoint());
+        mouseModel = m;
+        if (panning) {
+            tx += e.getX() - lastScreen.x;
+            ty += e.getY() - lastScreen.y;
+            lastScreen = e.getPoint();
+            panned = true;
+            repaint();
+            return;
+        }
+        if (wireFrom != null) {
+            hoverPort = portAt(m.getX(), m.getY());
+            repaint();
+            return;
+        }
+        if (movingBlocks) {
+            double dx = m.getX() - pressModel.getX();
+            double dy = m.getY() - pressModel.getY();
+            for (Map.Entry<Block, Point> en : moveStart.entrySet()) {
+                en.getKey().x = snap(en.getValue().x + dx);
+                en.getKey().y = snap(en.getValue().y + dy);
+            }
+            repaint();
+            return;
+        }
+        if (draggingWire != null && draggingSegment >= 0) {
+            // Move segment by adjusting waypoints
+            // Segment i connects point i to point i+1 in route
+            // For waypoints: segment 0 = src to wp[0], segment 1 = wp[0] to wp[1], etc.
+            // So waypoint indices affected: seg-1 and seg (clamped to valid range)
+            List<Point> wps = draggingWire.waypoints;
+            int wp1 = draggingSegment - 1;  // first waypoint of segment
+            int wp2 = draggingSegment;      // second waypoint of segment
+
+            if (segmentHorizontal) {
+                // Horizontal segment: moving changes Y
+                int newY = snap((int) m.getY());
+                if (wp1 >= 0 && wp1 < wps.size()) wps.get(wp1).y = newY;
+                if (wp2 >= 0 && wp2 < wps.size()) wps.get(wp2).y = newY;
+            } else {
+                // Vertical segment: moving changes X
+                int newX = snap((int) m.getX());
+                if (wp1 >= 0 && wp1 < wps.size()) wps.get(wp1).x = newX;
+                if (wp2 >= 0 && wp2 < wps.size()) wps.get(wp2).x = newX;
+            }
+            repaint();
+            return;
+        }
+        if (rubber != null) {
+            rubber.setFrameFromDiagonal(pressModel, m);
+            repaint();
+        }
+    }
+
+    private void mouseReleased(MouseEvent e) {
+        Point2D m = toModel(e.getPoint());
+        if (panning) {
+            panning = false;
+            return;
+        }
+        // Right click: context menu only if no rubber-band drag occurred
+        if (SwingUtilities.isRightMouseButton(e) && draggingWire == null && wireFrom == null) {
+            boolean rubberUsed = rubber != null && (rubber.getWidth() > 3 || rubber.getHeight() > 3);
+            if (!rubberUsed) {
+                rubber = null;
+                showPopup(e, m);
+                return;
+            }
+        }
+        if (wireFrom != null) {
+            Port p2 = portAt(m.getX(), m.getY());
+            if (p2 != null && p2 != wireFrom) {
+                if (diagram.connect(wireFrom, p2))
+                    frame.setStatus("Connected " + (wireFrom.input ? p2 : wireFrom)
+                            + " \u2192 " + (wireFrom.input ? wireFrom : p2));
+                else
+                    frame.setStatus("Cannot connect: needs one output and one input.");
+            }
+            wireFrom = null;
+            hoverPort = null;
+            repaint();
+            return;
+        }
+        if (rubber != null) {
+            for (Block b : diagram.blocks)
+                if (rubber.intersects(b.x, b.y, b.w, b.h)) selection.add(b);
+            rubber = null;
+            repaint();
+        }
+        if (draggingWire != null) {
+            // Clean up redundant waypoints (collinear points)
+            cleanupWaypoints(draggingWire);
+            draggingWire = null;
+            draggingSegment = -1;
+            repaint();
+        }
+        movingBlocks = false;
+    }
+
+    /** Remove redundant collinear waypoints. */
+    private void cleanupWaypoints(Wire w) {
+        List<Point> wps = w.waypoints;
+        if (wps.size() < 2) return;
+
+        // Build full point list including endpoints
+        List<Point2D> all = new ArrayList<>();
+        all.add(new Point2D.Double(portPos(w.src).x, portPos(w.src).y));
+        for (Point p : wps) all.add(new Point2D.Double(p.x, p.y));
+        all.add(new Point2D.Double(portPos(w.dst).x, portPos(w.dst).y));
+
+        // Find collinear intermediate points to remove
+        List<Integer> toRemove = new ArrayList<>();
+        for (int i = 1; i < all.size() - 1; i++) {
+            Point2D prev = all.get(i - 1);
+            Point2D cur = all.get(i);
+            Point2D next = all.get(i + 1);
+            // Check if cur is collinear (same X or same Y as both neighbors)
+            boolean sameX = (prev.getX() == cur.getX() && cur.getX() == next.getX());
+            boolean sameY = (prev.getY() == cur.getY() && cur.getY() == next.getY());
+            if (sameX || sameY) {
+                toRemove.add(i - 1);  // waypoint index = all index - 1
+            }
+        }
+
+        // Remove from end to preserve indices
+        for (int i = toRemove.size() - 1; i >= 0; i--) {
+            int idx = toRemove.get(i);
+            if (idx >= 0 && idx < wps.size()) wps.remove(idx);
+        }
+    }
+
+    private void mouseMoved(MouseEvent e) {
+        Point2D m = toModel(e.getPoint());
+        mouseModel = m;
+        Port p = portAt(m.getX(), m.getY());
+        if (p != hoverPort) {
+            hoverPort = p;
+            setCursor(Cursor.getPredefinedCursor(p != null ? Cursor.HAND_CURSOR
+                    : placing != null ? Cursor.CROSSHAIR_CURSOR : Cursor.DEFAULT_CURSOR));
+            repaint();
+        }
+    }
+
+    private void mouseClicked(MouseEvent e) {
+        if (e.getClickCount() != 2 || !SwingUtilities.isLeftMouseButton(e)) return;
+        Point2D m = toModel(e.getPoint());
+        Block b = blockAt(m.getX(), m.getY());
+        if (b == null) return;
+        if (b instanceof ScopeSink || b instanceof SpectrumSink)
+            frame.showPlots();
+        else
+            PropertyDialog.edit(frame, b, diagram, this);
+    }
+
+    private void wheel(MouseWheelEvent e) {
+        if (e.isControlDown()) {
+            double f = Math.pow(1.12, -e.getPreciseWheelRotation());
+            double ns = Math.max(0.2, Math.min(4.0, scale * f));
+            f = ns / scale;
+            tx = e.getX() - f * (e.getX() - tx);
+            ty = e.getY() - f * (e.getY() - ty);
+            scale = ns;
+            frame.setZoomLabel((int) Math.round(scale * 100) + "%");
+        } else if (e.isShiftDown()) {
+            tx -= e.getPreciseWheelRotation() * 40;
+        } else {
+            ty -= e.getPreciseWheelRotation() * 40;
+        }
+        repaint();
+    }
+
+    private void showPopup(MouseEvent e, Point2D m) {
+        Block b = blockAt(m.getX(), m.getY());
+        Wire w = b == null ? wireAt(m.getX(), m.getY()) : null;
+        JPopupMenu menu = new JPopupMenu();
+        if (b != null) {
+            if (!selection.contains(b)) { selection.clear(); selection.add(b); repaint(); }
+            JMenuItem props = new JMenuItem("Properties\u2026");
+            props.addActionListener(a -> PropertyDialog.edit(frame, b, diagram, this));
+            menu.add(props);
+            if (b instanceof ScopeSink || b instanceof SpectrumSink) {
+                JMenuItem v = new JMenuItem("Plot results");
+                v.addActionListener(a -> frame.showPlots());
+                menu.add(v);
+            }
+            menu.addSeparator();
+            JMenuItem rotate = new JMenuItem("Rotate (R)");
+            rotate.addActionListener(a -> { b.rotateCW(); clearWiresForBlock(b); repaint(); });
+            menu.add(rotate);
+            JMenuItem flipH = new JMenuItem("Flip horizontal (H)");
+            flipH.addActionListener(a -> { b.flipHorizontal(); clearWiresForBlock(b); repaint(); });
+            menu.add(flipH);
+            JMenuItem flipV = new JMenuItem("Flip vertical (V)");
+            flipV.addActionListener(a -> { b.flipVertical(); clearWiresForBlock(b); repaint(); });
+            menu.add(flipV);
+            menu.addSeparator();
+            JMenuItem del = new JMenuItem("Delete");
+            del.addActionListener(a -> { diagram.remove(b); selection.remove(b); repaint(); });
+            menu.add(del);
+        } else if (w != null) {
+            if (w.hasCustomRoute()) {
+                JMenuItem reset = new JMenuItem("Reset routing");
+                reset.addActionListener(a -> { w.clearWaypoints(); repaint(); });
+                menu.add(reset);
+            }
+            JMenuItem del = new JMenuItem("Delete wire");
+            del.addActionListener(a -> { diagram.remove(w); selection.remove(w); repaint(); });
+            menu.add(del);
+        } else {
+            JMenuItem rv = new JMenuItem("Reset view");
+            rv.addActionListener(a -> resetView());
+            menu.add(rv);
+        }
+        menu.show(this, e.getX(), e.getY());
+    }
+
+    private void deleteSelection() {
+        for (Object o : new ArrayList<>(selection)) {
+            if (o instanceof Block) diagram.remove((Block) o);
+            else if (o instanceof Wire) diagram.remove((Wire) o);
+        }
+        selection.clear();
+        repaint();
+    }
+
+    private void rotateSelection() {
+        boolean any = false;
+        for (Object o : selection) {
+            if (o instanceof Block) {
+                Block b = (Block) o;
+                b.rotateCW();
+                clearWiresForBlock(b);
+                any = true;
+            }
+        }
+        if (any) {
+            frame.setStatus("Rotated 90° clockwise. (R=rotate, H=flipH, V=flipV)");
+            repaint();
+        }
+    }
+
+    private void flipSelectionH() {
+        boolean any = false;
+        for (Object o : selection) {
+            if (o instanceof Block) {
+                Block b = (Block) o;
+                b.flipHorizontal();
+                clearWiresForBlock(b);
+                any = true;
+            }
+        }
+        if (any) {
+            frame.setStatus("Flipped horizontally. (R=rotate, H=flipH, V=flipV)");
+            repaint();
+        }
+    }
+
+    private void flipSelectionV() {
+        boolean any = false;
+        for (Object o : selection) {
+            if (o instanceof Block) {
+                Block b = (Block) o;
+                b.flipVertical();
+                clearWiresForBlock(b);
+                any = true;
+            }
+        }
+        if (any) {
+            frame.setStatus("Flipped vertically. (R=rotate, H=flipH, V=flipV)");
+            repaint();
+        }
+    }
+
+    private void clearWiresForBlock(Block b) {
+        for (Wire w : diagram.wires) {
+            if (w.src.block == b || w.dst.block == b) {
+                w.clearWaypoints();
+            }
+        }
+    }
+
+    private void copySelection() {
+        // Collect selected blocks
+        List<Block> blocks = new ArrayList<>();
+        for (Object o : selection)
+            if (o instanceof Block) blocks.add((Block) o);
+        if (blocks.isEmpty()) {
+            frame.setStatus("Nothing to copy.");
+            return;
+        }
+
+        // Use first block as reference point
+        int refX = blocks.get(0).x, refY = blocks.get(0).y;
+
+        clipboard.clear();
+        clipboardWires.clear();
+
+        // Store block data
+        Map<Block, Integer> blockIndex = new HashMap<>();
+        for (int i = 0; i < blocks.size(); i++) {
+            Block b = blocks.get(i);
+            blockIndex.put(b, i);
+            ClipboardEntry entry = new ClipboardEntry();
+            entry.type = b.type();
+            entry.dx = b.x - refX;
+            entry.dy = b.y - refY;
+            entry.params = new LinkedHashMap<>(b.params);
+            clipboard.add(entry);
+        }
+
+        // Store wires between copied blocks
+        for (Wire w : diagram.wires) {
+            Integer srcIdx = blockIndex.get(w.src.block);
+            Integer dstIdx = blockIndex.get(w.dst.block);
+            if (srcIdx != null && dstIdx != null) {
+                ClipboardWire cw = new ClipboardWire();
+                cw.srcIdx = srcIdx;
+                cw.dstIdx = dstIdx;
+                cw.srcPort = w.src.name;
+                cw.dstPort = w.dst.name;
+                cw.waypoints = new ArrayList<>();
+                for (Point p : w.waypoints)
+                    cw.waypoints.add(new Point(p.x - refX, p.y - refY));
+                clipboardWires.add(cw);
+            }
+        }
+
+        frame.setStatus("Copied " + blocks.size() + " block(s).");
+    }
+
+    private void paste() {
+        if (clipboard.isEmpty()) {
+            frame.setStatus("Clipboard empty.");
+            return;
+        }
+
+        // Paste at mouse position (snapped) or offset from original
+        int baseX = snap((int) mouseModel.getX());
+        int baseY = snap((int) mouseModel.getY());
+
+        // Create new blocks
+        List<Block> newBlocks = new ArrayList<>();
+        for (ClipboardEntry entry : clipboard) {
+            Block b = BlockLibrary.create(entry.type);
+            if (b == null) continue;
+            b.x = snap(baseX + entry.dx);
+            b.y = snap(baseY + entry.dy);
+            b.params.putAll(entry.params);
+            b.paramsChanged();
+            diagram.add(b);
+            newBlocks.add(b);
+        }
+
+        // Recreate wires
+        for (ClipboardWire cw : clipboardWires) {
+            if (cw.srcIdx >= newBlocks.size() || cw.dstIdx >= newBlocks.size()) continue;
+            Block srcBlock = newBlocks.get(cw.srcIdx);
+            Block dstBlock = newBlocks.get(cw.dstIdx);
+            Port src = diagram.findPort(srcBlock, cw.srcPort, false);
+            Port dst = diagram.findPort(dstBlock, cw.dstPort, true);
+            if (src != null && dst != null) {
+                Wire w = new Wire(src, dst);
+                for (Point p : cw.waypoints)
+                    w.waypoints.add(new Point(snap(baseX + p.x), snap(baseY + p.y)));
+                diagram.wires.add(w);
+            }
+        }
+
+        // Select pasted blocks
+        selection.clear();
+        selection.addAll(newBlocks);
+
+        frame.setStatus("Pasted " + newBlocks.size() + " block(s).");
+        repaint();
+    }
+
+    // ---- painting -----------------------------------------------------------
+
+    @Override protected void paintComponent(Graphics g) {
+        super.paintComponent(g);
+        Graphics2D g2 = (Graphics2D) g.create();
+        g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+        g2.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
+        g2.translate(tx, ty);
+        g2.scale(scale, scale);
+
+        paintGrid(g2);
+        for (Wire w : diagram.wires) paintWire(g2, w);
+        if (wireFrom != null) paintPendingWire(g2);
+        for (Block b : diagram.blocks) paintBlock(g2, b);
+
+        if (rubber != null) {
+            g2.setColor(new Color(0xE8861A));
+            g2.setStroke(new BasicStroke((float) (1 / scale), BasicStroke.CAP_BUTT,
+                    BasicStroke.JOIN_MITER, 10, new float[]{4, 4}, 0));
+            g2.draw(rubber);
+        }
+        g2.dispose();
+    }
+
+    private void paintGrid(Graphics2D g2) {
+        Rectangle2D vis = new Rectangle2D.Double(-tx / scale, -ty / scale,
+                getWidth() / scale, getHeight() / scale);
+        g2.setColor(GRID);
+        int step = 20;
+        int x0 = (int) Math.floor(vis.getMinX() / step) * step;
+        int y0 = (int) Math.floor(vis.getMinY() / step) * step;
+        for (int x = x0; x < vis.getMaxX(); x += step)
+            for (int y = y0; y < vis.getMaxY(); y += step)
+                g2.fillRect(x, y, 1, 1);
+    }
+
+    private void paintWire(Graphics2D g2, Wire w) {
+        boolean sel = selection.contains(w);
+        g2.setColor(sel ? SEL : WIRE);
+        g2.setStroke(new BasicStroke(sel ? 2.4f : 1.8f,
+                BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
+        List<Point2D> pts = route(w);
+        Path2D path = new Path2D.Double();
+        path.moveTo(pts.get(0).getX(), pts.get(0).getY());
+        for (int i = 1; i < pts.size(); i++)
+            path.lineTo(pts.get(i).getX(), pts.get(i).getY());
+        g2.draw(path);
+
+        // arrowhead at destination
+        Point2D b0 = pts.get(pts.size() - 1);
+        Point2D b1 = pts.get(pts.size() - 2);
+        double ang = Math.atan2(b0.getY() - b1.getY(), b0.getX() - b1.getX());
+        double arrowLen = 18;
+        double arrowAngle = 0.4;
+        Path2D ah = new Path2D.Double();
+        ah.moveTo(b0.getX(), b0.getY());
+        ah.lineTo(b0.getX() - arrowLen * Math.cos(ang - arrowAngle), b0.getY() - arrowLen * Math.sin(ang - arrowAngle));
+        ah.lineTo(b0.getX() - arrowLen * Math.cos(ang + arrowAngle), b0.getY() - arrowLen * Math.sin(ang + arrowAngle));
+        ah.closePath();
+        g2.fill(ah);
+
+        // bus width label near the source
+        if (showBitWidths) {
+            g2.setFont(g2.getFont().deriveFont(9f));
+            g2.setColor(new Color(0x9AA0AA));
+            Point sp = portPos(w.src);
+            g2.drawString(w.src.width + "b", sp.x + 4, sp.y - 4);
+        }
+
+        // net name at wire midpoint
+        if (showNetNames) {
+            g2.setFont(g2.getFont().deriveFont(9f));
+            g2.setColor(new Color(0x5A6A7A));
+            String netName = w.src.block.label() + "." + w.src.name;
+            // Find midpoint of wire
+            int midIdx = pts.size() / 2;
+            Point2D mid = pts.get(midIdx);
+            g2.drawString(netName, (int) mid.getX() + 3, (int) mid.getY() - 3);
+        }
+
+        // Draw waypoint handles when selected and has custom routing
+        if (sel && w.hasCustomRoute()) {
+            g2.setColor(SEL);
+            for (Point wp : w.waypoints) {
+                g2.fillRect(wp.x - 3, wp.y - 3, 6, 6);
+            }
+        }
+    }
+
+    private void paintPendingWire(Graphics2D g2) {
+        Point a = portPos(wireFrom);
+        g2.setColor(SEL);
+        g2.setStroke(new BasicStroke(1.6f, BasicStroke.CAP_BUTT, BasicStroke.JOIN_MITER,
+                10, new float[]{5, 4}, 0));
+        g2.draw(new Line2D.Double(a.x, a.y, mouseModel.getX(), mouseModel.getY()));
+    }
+
+    private Color fillFor(Block b) {
+        String t = b.type();
+        if (t.equals("Scope") || t.equals("Spectrum")) return new Color(0xE9F1FB);
+        if (t.equals("Constant") || t.equals("Impulse") || t.equals("Sine")) return new Color(0xFDF6E3);
+        if (t.equals("Clock")) return new Color(0xF3EAF8);
+        return Color.WHITE;
+    }
+
+    private void paintBlock(Graphics2D g2, Block b) {
+        boolean sel = selection.contains(b);
+        Shape rr = new RoundRectangle2D.Double(b.x, b.y, b.w, b.h, 10, 10);
+        g2.setColor(new Color(0, 0, 0, 18));
+        g2.fill(new RoundRectangle2D.Double(b.x + 2, b.y + 3, b.w, b.h, 10, 10));
+        g2.setColor(fillFor(b));
+        g2.fill(rr);
+        g2.setColor(sel ? SEL : BORDER);
+        g2.setStroke(new BasicStroke(sel ? 2.2f : 1.2f));
+        g2.draw(rr);
+
+        // glyph
+        g2.setColor(new Color(0x2B3340));
+        g2.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 20));
+        String gl = b.glyph();
+        FontMetrics fm = g2.getFontMetrics();
+        g2.drawString(gl, b.x + (b.w - fm.stringWidth(gl)) / 2,
+                b.y + (b.h + fm.getAscent() - fm.getDescent()) / 2);
+
+        // caption (block name)
+        if (showBlockNames) {
+            g2.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 10));
+            g2.setColor(new Color(0x6B7280));
+            String lab = b.label();
+            fm = g2.getFontMetrics();
+            g2.drawString(lab, b.x + (b.w - fm.stringWidth(lab)) / 2, b.y + b.h + 13);
+        }
+
+        // ports
+        for (Port p : b.inputs) paintPort(g2, p, b);
+        for (Port p : b.outputs) paintPort(g2, p, b);
+    }
+
+    private static final Color PORT_INPUT = new Color(0x3B82F6);   // blue
+    private static final Color PORT_OUTPUT = new Color(0x22C55E);  // green
+    private static final Color PORT_CE = new Color(0x8E5BAE);      // purple
+
+    private void paintPort(Graphics2D g2, Port p, Block b) {
+        Point pos = portPos(p);
+        boolean hot = p == hoverPort || p == wireFrom;
+        int r = hot ? 5 : 4;
+
+        if (p.isCE()) {
+            // CE port: purple filled circle
+            g2.setColor(hot ? SEL : PORT_CE);
+            g2.fillOval(pos.x - r, pos.y - r, 2 * r, 2 * r);
+            g2.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 8));
+            g2.drawString("ce", pos.x + 5, pos.y + 8);
+        } else if (p.input) {
+            // Input port: blue hollow circle
+            g2.setColor(hot ? SEL : PORT_INPUT);
+            g2.setStroke(new BasicStroke(1.5f));
+            g2.drawOval(pos.x - r, pos.y - r, 2 * r, 2 * r);
+            // Show signs for Sum block inputs
+            if (b.type().equals("Sum")) {
+                String signs = b.ps("signs", "++").replaceAll("[^+\\-]", "");
+                int idx = b.inputs.indexOf(p);
+                if (idx >= 0 && idx < signs.length()) {
+                    g2.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 12));
+                    g2.setColor(signs.charAt(idx) == '-' ? new Color(0xDC2626) : new Color(0x16A34A));
+                    g2.drawString(String.valueOf(signs.charAt(idx)), pos.x + 8, pos.y + 5);
+                }
+            }
+            // Show port names for multi-input blocks (Scope, Spectrum)
+            else if (hasMultipleInputs(b)) {
+                g2.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 9));
+                g2.setColor(new Color(0x6B7280));
+                g2.drawString(p.name, pos.x + 10, pos.y + 4);
+            }
+        } else {
+            // Output port: green filled circle
+            g2.setColor(hot ? SEL : PORT_OUTPUT);
+            g2.fillOval(pos.x - r, pos.y - r, 2 * r, 2 * r);
+        }
+
+        // floating (unwired, non-CE) inputs get a subtle warning ring
+        if (p.input && !p.isCE() && p.driver == null && !isWired(p)) {
+            g2.setColor(new Color(0xD05050));
+            g2.setStroke(new BasicStroke(1f));
+            g2.drawOval(pos.x - 7, pos.y - 7, 14, 14);
+        }
+    }
+
+    private boolean hasMultipleInputs(Block b) {
+        int count = 0;
+        for (Port p : b.inputs) if (!p.isCE()) count++;
+        return count > 1;
+    }
+
+    private boolean isWired(Port p) {
+        for (Wire w : diagram.wires) if (w.dst == p) return true;
+        return false;
+    }
+}
