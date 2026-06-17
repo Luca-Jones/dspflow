@@ -39,6 +39,7 @@ public class CanvasPanel extends JPanel {
     private boolean movingBlocks = false;
     private Point2D pressModel;
     private final Map<Block, Point> moveStart = new HashMap<>();
+    private final Map<Wire, List<Point>> wireWaypointStart = new HashMap<>();
     private Rectangle2D rubber = null;
 
     // Wire segment dragging state
@@ -55,6 +56,9 @@ public class CanvasPanel extends JPanel {
     private static class ClipboardEntry {
         String type;
         int dx, dy;  // offset from first block
+        int w, h;
+        int rotation;
+        boolean flipH, flipV;
         Map<String, String> params;
     }
     private static class ClipboardWire {
@@ -252,6 +256,16 @@ public class CanvasPanel extends JPanel {
             }
         }
         return null;
+    }
+
+    private boolean wireIntersectsRect(Wire w, Rectangle2D r) {
+        List<Point2D> pts = route(w);
+        for (int i = 0; i + 1 < pts.size(); i++) {
+            if (r.intersectsLine(pts.get(i).getX(), pts.get(i).getY(),
+                    pts.get(i + 1).getX(), pts.get(i + 1).getY()))
+                return true;
+        }
+        return false;
     }
 
     // ---- wire routing (simple orthogonal) --------------------------------
@@ -455,19 +469,32 @@ public class CanvasPanel extends JPanel {
             movingBlocks = true;
             pressModel = m;
             moveStart.clear();
+            wireWaypointStart.clear();
+            Set<Block> selectedBlocks = new HashSet<>();
             for (Object o : selection) {
                 if (o instanceof Block) {
                     Block blk = (Block) o;
                     moveStart.put(blk, new Point(blk.x, blk.y));
+                    selectedBlocks.add(blk);
+                }
+            }
+            // Track waypoints of wires fully within selection
+            for (Wire wire : diagram.wires) {
+                if (selectedBlocks.contains(wire.src.block) && selectedBlocks.contains(wire.dst.block)) {
+                    List<Point> copy = new ArrayList<>();
+                    for (Point pt : wire.waypoints) copy.add(new Point(pt));
+                    wireWaypointStart.put(wire, copy);
                 }
             }
             repaint();
             return;
         }
 
-        // Left on empty: pan
+        // Left on empty: clear selection and pan
         if (left) {
+            if (!e.isControlDown()) selection.clear();
             panning = true;
+            repaint();
             return;
         }
 
@@ -502,6 +529,15 @@ public class CanvasPanel extends JPanel {
             for (Map.Entry<Block, Point> en : moveStart.entrySet()) {
                 en.getKey().x = snap(en.getValue().x + dx);
                 en.getKey().y = snap(en.getValue().y + dy);
+            }
+            // Move wire waypoints with blocks
+            for (Map.Entry<Wire, List<Point>> en : wireWaypointStart.entrySet()) {
+                Wire w = en.getKey();
+                List<Point> orig = en.getValue();
+                w.waypoints.clear();
+                for (Point p : orig) {
+                    w.waypoints.add(new Point(snap(p.x + dx), snap(p.y + dy)));
+                }
             }
             repaint();
             return;
@@ -575,6 +611,8 @@ public class CanvasPanel extends JPanel {
         if (rubber != null) {
             for (Block b : diagram.blocks)
                 if (rubber.intersects(b.x, b.y, b.w, b.h)) selection.add(b);
+            for (Wire w : diagram.wires)
+                if (wireIntersectsRect(w, rubber)) selection.add(w);
             rubber = null;
             repaint();
         }
@@ -801,6 +839,11 @@ public class CanvasPanel extends JPanel {
             entry.type = b.type();
             entry.dx = b.x - refX;
             entry.dy = b.y - refY;
+            entry.w = b.w;
+            entry.h = b.h;
+            entry.rotation = b.rotation;
+            entry.flipH = b.flipH;
+            entry.flipV = b.flipV;
             entry.params = new LinkedHashMap<>(b.params);
             clipboard.add(entry);
         }
@@ -842,6 +885,11 @@ public class CanvasPanel extends JPanel {
             if (b == null) continue;
             b.x = snap(baseX + entry.dx);
             b.y = snap(baseY + entry.dy);
+            b.w = entry.w;
+            b.h = entry.h;
+            b.rotation = entry.rotation;
+            b.flipH = entry.flipH;
+            b.flipV = entry.flipV;
             b.params.putAll(entry.params);
             b.paramsChanged();
             diagram.add(b);
@@ -849,6 +897,7 @@ public class CanvasPanel extends JPanel {
         }
 
         // Recreate wires
+        List<Wire> newWires = new ArrayList<>();
         for (ClipboardWire cw : clipboardWires) {
             if (cw.srcIdx >= newBlocks.size() || cw.dstIdx >= newBlocks.size()) continue;
             Block srcBlock = newBlocks.get(cw.srcIdx);
@@ -860,12 +909,14 @@ public class CanvasPanel extends JPanel {
                 for (Point p : cw.waypoints)
                     w.waypoints.add(new Point(snap(baseX + p.x), snap(baseY + p.y)));
                 diagram.wires.add(w);
+                newWires.add(w);
             }
         }
 
-        // Select pasted blocks
+        // Select pasted blocks and wires
         selection.clear();
         selection.addAll(newBlocks);
+        selection.addAll(newWires);
 
         frame.setStatus("Pasted " + newBlocks.size() + " block(s).");
         repaint();
