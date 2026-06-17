@@ -1,12 +1,13 @@
 # DSPFlow
 
 A small Simulink-style block-diagram editor and simulator for **fixed-point,
-multirate DSP**, written in plain Java SE (Swing).
+multirate DSP**. The gui and simulation enginer are written in Java and 
+the plots are generated with the matplotlib Python library.
 
 ## Dependencies
 
-- **JDK 11+** (`javac` on PATH)
-- **Python 3 with matplotlib** (for plotting)
+- **JDK 11+**
+- **Python 3 with matplotlib**
 
 ### Option 1: Global install
 
@@ -18,7 +19,7 @@ pip install matplotlib
 
 ```bash
 python3 -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
+source .venv/bin/activate
 pip install matplotlib
 ```
 
