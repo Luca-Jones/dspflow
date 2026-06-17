@@ -10,6 +10,7 @@ import javax.swing.*;
 import dspflow.model.*;
 import dspflow.model.blocks.ScopeSink;
 import dspflow.model.blocks.SpectrumSink;
+import dspflow.model.blocks.StickyNote;
 
 /**
  * The schematic editor.
@@ -45,6 +46,10 @@ public class CanvasPanel extends JPanel {
     private int draggingSegment = -1;  // index of segment being dragged
     private boolean segmentHorizontal = false;
     private Point2D segmentDragStart = null;
+
+    // Resize state for sticky notes
+    private Block resizingBlock = null;
+    private int resizeStartW, resizeStartH;
 
     // Clipboard for copy/paste
     private static class ClipboardEntry {
@@ -216,6 +221,22 @@ public class CanvasPanel extends JPanel {
         for (int i = diagram.blocks.size() - 1; i >= 0; i--) {
             Block b = diagram.blocks.get(i);
             if (mx >= b.x && mx <= b.x + b.w && my >= b.y && my <= b.y + b.h) return b;
+        }
+        return null;
+    }
+
+    private static final int RESIZE_HANDLE = 12;
+
+    private Block resizeHandleAt(double mx, double my) {
+        for (int i = diagram.blocks.size() - 1; i >= 0; i--) {
+            Block b = diagram.blocks.get(i);
+            if (!(b instanceof StickyNote)) continue;
+            // Check if in bottom-right corner resize area
+            double hx = b.x + b.w;
+            double hy = b.y + b.h;
+            if (mx >= hx - RESIZE_HANDLE && mx <= hx && my >= hy - RESIZE_HANDLE && my <= hy) {
+                return b;
+            }
         }
         return null;
     }
@@ -409,6 +430,19 @@ public class CanvasPanel extends JPanel {
             return;
         }
 
+        // Left click on resize handle (sticky notes)
+        Block resizeTarget = resizeHandleAt(m.getX(), m.getY());
+        if (resizeTarget != null && left) {
+            resizingBlock = resizeTarget;
+            resizeStartW = resizeTarget.w;
+            resizeStartH = resizeTarget.h;
+            pressModel = m;
+            selection.clear();
+            selection.add(resizeTarget);
+            repaint();
+            return;
+        }
+
         // Left click on block: select/drag
         Block b = blockAt(m.getX(), m.getY());
         if (b != null && left) {
@@ -469,6 +503,14 @@ public class CanvasPanel extends JPanel {
                 en.getKey().x = snap(en.getValue().x + dx);
                 en.getKey().y = snap(en.getValue().y + dy);
             }
+            repaint();
+            return;
+        }
+        if (resizingBlock != null) {
+            double dx = m.getX() - pressModel.getX();
+            double dy = m.getY() - pressModel.getY();
+            resizingBlock.w = Math.max(60, snap(resizeStartW + dx));
+            resizingBlock.h = Math.max(40, snap(resizeStartH + dy));
             repaint();
             return;
         }
@@ -544,6 +586,7 @@ public class CanvasPanel extends JPanel {
             repaint();
         }
         movingBlocks = false;
+        resizingBlock = null;
     }
 
     /** Remove redundant collinear waypoints. */
@@ -582,10 +625,15 @@ public class CanvasPanel extends JPanel {
         Point2D m = toModel(e.getPoint());
         mouseModel = m;
         Port p = portAt(m.getX(), m.getY());
-        if (p != hoverPort) {
+        Block resizeTarget = resizeHandleAt(m.getX(), m.getY());
+        if (p != hoverPort || resizeTarget != null) {
             hoverPort = p;
-            setCursor(Cursor.getPredefinedCursor(p != null ? Cursor.HAND_CURSOR
-                    : placing != null ? Cursor.CROSSHAIR_CURSOR : Cursor.DEFAULT_CURSOR));
+            Cursor c;
+            if (resizeTarget != null) c = Cursor.getPredefinedCursor(Cursor.SE_RESIZE_CURSOR);
+            else if (p != null) c = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR);
+            else if (placing != null) c = Cursor.getPredefinedCursor(Cursor.CROSSHAIR_CURSOR);
+            else c = Cursor.getDefaultCursor();
+            setCursor(c);
             repaint();
         }
     }
@@ -930,6 +978,13 @@ public class CanvasPanel extends JPanel {
 
     private void paintBlock(Graphics2D g2, Block b) {
         boolean sel = selection.contains(b);
+
+        // Sticky notes get special rendering
+        if (b instanceof StickyNote) {
+            paintStickyNote(g2, (StickyNote) b, sel);
+            return;
+        }
+
         Shape rr = new RoundRectangle2D.Double(b.x, b.y, b.w, b.h, 10, 10);
         g2.setColor(new Color(0, 0, 0, 18));
         g2.fill(new RoundRectangle2D.Double(b.x + 2, b.y + 3, b.w, b.h, 10, 10));
@@ -959,6 +1014,74 @@ public class CanvasPanel extends JPanel {
         // ports
         for (Port p : b.inputs) paintPort(g2, p, b);
         for (Port p : b.outputs) paintPort(g2, p, b);
+    }
+
+    private static final Color NOTE_FILL = new Color(0xFFF9C4);  // light yellow
+    private static final Color NOTE_BORDER = new Color(0xF9A825);  // darker yellow
+
+    private void paintStickyNote(Graphics2D g2, StickyNote note, boolean sel) {
+        // Shadow
+        g2.setColor(new Color(0, 0, 0, 25));
+        g2.fill(new Rectangle2D.Double(note.x + 3, note.y + 3, note.w, note.h));
+
+        // Fill
+        g2.setColor(NOTE_FILL);
+        g2.fill(new Rectangle2D.Double(note.x, note.y, note.w, note.h));
+
+        // Border
+        g2.setColor(sel ? SEL : NOTE_BORDER);
+        g2.setStroke(new BasicStroke(sel ? 2f : 1f));
+        g2.draw(new Rectangle2D.Double(note.x, note.y, note.w, note.h));
+
+        // Text with word wrap
+        String text = note.text();
+        if (!text.isEmpty()) {
+            g2.setColor(new Color(0x5D4037));  // brown text
+            g2.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 11));
+            FontMetrics fm = g2.getFontMetrics();
+            int lineH = fm.getHeight();
+            int pad = 6;
+            int maxW = note.w - pad * 2;
+            int y = note.y + pad + fm.getAscent();
+            int maxY = note.y + note.h - pad;
+
+            for (String line : text.split("\n")) {
+                // Word wrap each paragraph
+                if (line.isEmpty()) {
+                    y += lineH;
+                    if (y > maxY) break;
+                    continue;
+                }
+                String[] words = line.split(" ");
+                StringBuilder current = new StringBuilder();
+                for (String word : words) {
+                    String test = current.length() == 0 ? word : current + " " + word;
+                    if (fm.stringWidth(test) <= maxW) {
+                        current = new StringBuilder(test);
+                    } else {
+                        if (current.length() > 0) {
+                            g2.drawString(current.toString(), note.x + pad, y);
+                            y += lineH;
+                            if (y > maxY) break;
+                        }
+                        current = new StringBuilder(word);
+                    }
+                }
+                if (current.length() > 0 && y <= maxY) {
+                    g2.drawString(current.toString(), note.x + pad, y);
+                    y += lineH;
+                }
+                if (y > maxY) break;
+            }
+        }
+
+        // Resize handle (bottom-right corner triangle)
+        int hx = note.x + note.w;
+        int hy = note.y + note.h;
+        g2.setColor(NOTE_BORDER);
+        int[] xpts = { hx - RESIZE_HANDLE, hx, hx };
+        int[] ypts = { hy, hy - RESIZE_HANDLE, hy };
+        g2.fillPolygon(xpts, ypts, 3);
     }
 
     private static final Color PORT_INPUT = new Color(0x3B82F6);   // blue

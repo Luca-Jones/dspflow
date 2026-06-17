@@ -132,7 +132,8 @@ public class MainFrame extends JFrame {
             {"Constant", "Impulse", "Sine", "Clock"},
             {"Delay", "Sum", "Mult", "Shift"},
             {"Decim", "Interp"},
-            {"Scope", "Spectrum"}
+            {"Scope", "Spectrum"},
+            {"Note"}
         };
         for (String[] grp : groups) {
             for (String t : grp) p.add(paletteButton(t, t));

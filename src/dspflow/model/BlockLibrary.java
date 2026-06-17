@@ -12,7 +12,8 @@ public class BlockLibrary {
         "Constant", "Impulse", "Sine", "Clock",
         "Delay", "Sum", "Mult", "Shift",
         "Decim", "Interp",
-        "Scope", "Spectrum"
+        "Scope", "Spectrum",
+        "Note"
     };
 
     public static Block create(String type) {
@@ -29,6 +30,7 @@ public class BlockLibrary {
             case "Interp":   return new InterpolatorBlock();
             case "Scope":    return new ScopeSink();
             case "Spectrum": return new SpectrumSink();
+            case "Note":     return new StickyNote();
             default:         return null;
         }
     }
@@ -48,6 +50,7 @@ public class BlockLibrary {
             case "Interp":   return "Interpolator: zero-stuff by L";
             case "Scope":    return "Time-domain scope (samples every tick)";
             case "Spectrum": return "FFT magnitude view";
+            case "Note":     return "Resizable text annotation";
             default:         return type;
         }
     }

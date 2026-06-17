@@ -7,6 +7,7 @@ import javax.swing.*;
 
 import dspflow.model.Block;
 import dspflow.model.Diagram;
+import dspflow.model.blocks.StickyNote;
 
 /**
  * Generic parameter editor: shows one text field per entry in the block's
@@ -25,6 +26,12 @@ public class PropertyDialog {
     }
 
     public static void edit(Window owner, Block b, Diagram d, CanvasPanel canvas) {
+        // Sticky notes get a simpler text-only editor
+        if (b instanceof StickyNote) {
+            editStickyNote(owner, (StickyNote) b, canvas);
+            return;
+        }
+
         JDialog dlg = new JDialog(owner, b.type() + " " + b.id + " properties",
                 Dialog.ModalityType.APPLICATION_MODAL);
         JPanel grid = new JPanel(new GridBagLayout());
@@ -76,6 +83,38 @@ public class PropertyDialog {
 
         dlg.setLayout(new BorderLayout());
         dlg.add(grid, BorderLayout.CENTER);
+        dlg.add(btns, BorderLayout.SOUTH);
+        dlg.getRootPane().setDefaultButton(ok);
+        dlg.pack();
+        dlg.setLocationRelativeTo(owner);
+        dlg.setVisible(true);
+    }
+
+    private static void editStickyNote(Window owner, StickyNote note, CanvasPanel canvas) {
+        JDialog dlg = new JDialog(owner, "Edit Note",
+                Dialog.ModalityType.APPLICATION_MODAL);
+
+        JTextArea textArea = new JTextArea(note.text(), 8, 25);
+        textArea.setLineWrap(true);
+        textArea.setWrapStyleWord(true);
+        JScrollPane scroll = new JScrollPane(textArea);
+        scroll.setBorder(BorderFactory.createEmptyBorder(10, 10, 5, 10));
+
+        JButton ok = new JButton("OK");
+        JButton cancel = new JButton("Cancel");
+        ok.addActionListener(a -> {
+            note.params.put("text", textArea.getText());
+            canvas.repaint();
+            dlg.dispose();
+        });
+        cancel.addActionListener(a -> dlg.dispose());
+
+        JPanel btns = new JPanel(new FlowLayout(FlowLayout.RIGHT));
+        btns.add(cancel);
+        btns.add(ok);
+
+        dlg.setLayout(new BorderLayout());
+        dlg.add(scroll, BorderLayout.CENTER);
         dlg.add(btns, BorderLayout.SOUTH);
         dlg.getRootPane().setDefaultButton(ok);
         dlg.pack();

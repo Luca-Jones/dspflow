@@ -65,6 +65,7 @@ public class Diagram {
             pw.println("DSPFLOW 1");
             for (Block b : blocks) {
                 pw.println("BLOCK " + b.type() + " " + b.id + " " + b.x + " " + b.y
+                        + " " + b.w + " " + b.h
                         + " " + b.rotation + " " + (b.flipH ? 1 : 0) + " " + (b.flipV ? 1 : 0));
                 for (Map.Entry<String, String> e : b.params.entrySet())
                     pw.println("P " + e.getKey() + "=" + e.getValue());
@@ -97,10 +98,22 @@ public class Diagram {
                     cur.id = Integer.parseInt(t[2]);
                     cur.x = Integer.parseInt(t[3]);
                     cur.y = Integer.parseInt(t[4]);
-                    // Parse rotation and flip (optional, for backwards compatibility)
-                    if (t.length > 5) cur.rotation = Integer.parseInt(t[5]) % 4;
-                    if (t.length > 6) cur.flipH = Integer.parseInt(t[6]) != 0;
-                    if (t.length > 7) cur.flipV = Integer.parseInt(t[7]) != 0;
+                    // Parse size, rotation, flip (optional, for backwards compatibility)
+                    // New format: BLOCK type id x y w h rot flipH flipV (10 tokens)
+                    // Old format: BLOCK type id x y rot flipH flipV (8 tokens)
+                    if (t.length >= 10) {
+                        // New format with w/h
+                        cur.w = Integer.parseInt(t[5]);
+                        cur.h = Integer.parseInt(t[6]);
+                        cur.rotation = Integer.parseInt(t[7]) % 4;
+                        cur.flipH = Integer.parseInt(t[8]) != 0;
+                        cur.flipV = Integer.parseInt(t[9]) != 0;
+                    } else {
+                        // Old format without w/h
+                        if (t.length > 5) cur.rotation = Integer.parseInt(t[5]) % 4;
+                        if (t.length > 6) cur.flipH = Integer.parseInt(t[6]) != 0;
+                        if (t.length > 7) cur.flipV = Integer.parseInt(t[7]) != 0;
+                    }
                     d.blocks.add(cur);
                     byId.put(cur.id, cur);
                     maxId = Math.max(maxId, cur.id);
