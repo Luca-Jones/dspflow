@@ -211,6 +211,27 @@ public class CanvasPanel extends JPanel {
         }
     }
 
+    /** Get the edge a port is on (0=left, 1=top, 2=right, 3=bottom) after rotation/flip. */
+    private int portEdge(Port p) {
+        Block b = p.block;
+        int edge;
+        if (p.input) {
+            edge = p.isCE() ? 3 : 0;
+        } else {
+            edge = 2;
+        }
+        edge = (edge + b.rotation) % 4;
+        if (b.flipH) {
+            if (edge == 0) edge = 2;
+            else if (edge == 2) edge = 0;
+        }
+        if (b.flipV) {
+            if (edge == 1) edge = 3;
+            else if (edge == 3) edge = 1;
+        }
+        return edge;
+    }
+
     private Port portAt(double mx, double my) {
         double r = Math.max(7, 7 / scale);
         for (int i = diagram.blocks.size() - 1; i >= 0; i--) {
@@ -270,85 +291,206 @@ public class CanvasPanel extends JPanel {
 
     // ---- wire routing (simple orthogonal) --------------------------------
 
-    private List<Point2D> route(Wire w) {
-        if (w.hasCustomRoute()) {
-            return routeWithWaypoints(w);
-        }
-        return routeAuto(portPos(w.src), portPos(w.dst), w.dst.isCE());
-    }
+    private static final int STUB = 24;
 
-    /** Route using explicit waypoints - ensures orthogonal segments. */
-    private List<Point2D> routeWithWaypoints(Wire w) {
-        List<Point2D> keyPts = new ArrayList<>();
+    /**
+     * Full drawn polyline: [srcPort, srcStub, corners..., dstStub, dstPort].
+     * Stubs always run STUB px straight out of each port (along the port edge
+     * axis), so a wire leaves/enters an arrowhead in the direction it faces and
+     * the first turn is STUB px away. The interior corners are exactly the
+     * waypoints for custom routes (kept normalized via normalizeWaypoints).
+     */
+    private List<Point2D> route(Wire w) {
         Point a0 = portPos(w.src);
         Point b0 = portPos(w.dst);
+        Point2D a1 = stubPoint(w.src);
+        Point2D b1 = stubPoint(w.dst);
+        boolean srcH = (portEdge(w.src) % 2) == 0;  // edges 0/2 = horizontal axis
+        boolean dstH = (portEdge(w.dst) % 2) == 0;
 
-        keyPts.add(new Point2D.Double(a0.x, a0.y));
-        for (Point wp : w.waypoints) {
-            keyPts.add(new Point2D.Double(wp.x, wp.y));
-        }
-        keyPts.add(new Point2D.Double(b0.x, b0.y));
+        List<Point2D> anchors = new ArrayList<>();
+        anchors.add(a1);
+        if (w.hasCustomRoute())
+            for (Point p : w.waypoints) anchors.add(new Point2D.Double(p.x, p.y));
+        else
+            anchors.addAll(autoCorners(w));
+        anchors.add(b1);
 
-        // Build result with orthogonal connections
-        List<Point2D> result = new ArrayList<>();
-        result.add(keyPts.get(0));
-        for (int i = 0; i < keyPts.size() - 1; i++) {
-            Point2D p1 = keyPts.get(i);
-            Point2D p2 = keyPts.get(i + 1);
-            // If not aligned, insert corner point (horizontal first)
-            if (p1.getX() != p2.getX() && p1.getY() != p2.getY()) {
-                result.add(new Point2D.Double(p2.getX(), p1.getY()));
-            }
-            result.add(p2);
-        }
-        return result;
+        List<Point2D> chain = orthogonalize(anchors, srcH, dstH);
+
+        List<Point2D> out = new ArrayList<>();
+        out.add(new Point2D.Double(a0.x, a0.y));
+        out.addAll(chain);
+        out.add(new Point2D.Double(b0.x, b0.y));
+        return out;
     }
 
-    /** Auto-route (original algorithm). */
-    private List<Point2D> routeAuto(Point a0, Point b0, boolean dstBottom) {
+    /**
+     * Connect anchors (stub..waypoints..stub) into an orthogonal polyline,
+     * inserting an L-corner between any two anchors that don't already share an
+     * axis. The corner adjacent to a stub is oriented so the segment touching
+     * the stub runs along the stub's axis (so the wire exits/enters the port
+     * straight). Returns all points from the first anchor to the last.
+     */
+    private List<Point2D> orthogonalize(List<Point2D> anchors, boolean srcH, boolean dstH) {
+        List<Point2D> out = new ArrayList<>();
+        out.add(anchors.get(0));
+        int n = anchors.size();
+        for (int i = 1; i < n; i++) {
+            Point2D prev = out.get(out.size() - 1);
+            Point2D cur = anchors.get(i);
+            boolean aligned = prev.getX() == cur.getX() || prev.getY() == cur.getY();
+            if (!aligned) {
+                boolean horizFirst;
+                if (i == 1) horizFirst = srcH;          // leave src along stub axis
+                else if (i == n - 1) horizFirst = !dstH; // enter dst along stub axis
+                else horizFirst = Math.abs(cur.getX() - prev.getX())
+                        >= Math.abs(cur.getY() - prev.getY());
+                Point2D corner = horizFirst
+                        ? new Point2D.Double(cur.getX(), prev.getY())
+                        : new Point2D.Double(prev.getX(), cur.getY());
+                out.add(corner);
+            }
+            out.add(cur);
+        }
+        return out;
+    }
+
+    /** Interior corner points of the auto-route (between the two stubs). */
+    private List<Point2D> autoCorners(Wire w) {
+        List<Point2D> pts = routeAuto(w);
+        return new ArrayList<>(pts.subList(2, pts.size() - 2));
+    }
+
+    /** Get stub point extending outward from port based on its edge. */
+    private Point2D stubPoint(Port p) {
+        Point pos = portPos(p);
+        int edge = portEdge(p);
+        switch (edge) {
+            case 0: return new Point2D.Double(pos.x - STUB, pos.y);  // left
+            case 1: return new Point2D.Double(pos.x, pos.y - STUB);  // top
+            case 2: return new Point2D.Double(pos.x + STUB, pos.y);  // right
+            case 3: return new Point2D.Double(pos.x, pos.y + STUB);  // bottom
+            default: return new Point2D.Double(pos.x, pos.y);
+        }
+    }
+
+    /** Auto-route based on port edges, avoiding backtracking and dst block. */
+    private List<Point2D> routeAuto(Wire w) {
+        Point a0 = portPos(w.src);
+        Point b0 = portPos(w.dst);
+        Point2D a1 = stubPoint(w.src);
+        Point2D b1 = stubPoint(w.dst);
+
+        int srcEdge = portEdge(w.src);
+        int dstEdge = portEdge(w.dst);
+        Block dstBlock = w.dst.block;
+
+        // Outward direction of each stub (pointing away from its own port).
+        // The wire must leave the src stub this way and approach the dst stub
+        // from this side, so a segment never reverses into a stub (no left->right
+        // or up->down without a perpendicular run between).
+        int sox = (srcEdge == 2) ? 1 : (srcEdge == 0) ? -1 : 0;
+        int soy = (srcEdge == 3) ? 1 : (srcEdge == 1) ? -1 : 0;
+        int dox = (dstEdge == 2) ? 1 : (dstEdge == 0) ? -1 : 0;
+        int doy = (dstEdge == 3) ? 1 : (dstEdge == 1) ? -1 : 0;
+
+        boolean srcHoriz = (sox != 0);
+        boolean dstHoriz = (dox != 0);
+
         List<Point2D> pts = new ArrayList<>();
-        Point2D a1 = new Point2D.Double(a0.x + 14, a0.y);
         pts.add(new Point2D.Double(a0.x, a0.y));
         pts.add(a1);
-        if (dstBottom) {
-            Point2D b1 = new Point2D.Double(b0.x, b0.y + 16);
-            if (b1.getY() >= a1.getY()) {
-                pts.add(new Point2D.Double(b1.getX(), a1.getY()));
+
+        // Clearance around destination block
+        int margin = STUB + 4;
+        double dstLeft = dstBlock.x - margin;
+        double dstRight = dstBlock.x + dstBlock.w + margin;
+        double dstTop = dstBlock.y - margin;
+        double dstBottom = dstBlock.y + dstBlock.h + margin;
+        double dstCenterX = dstBlock.x + dstBlock.w / 2.0;
+        double dstCenterY = dstBlock.y + dstBlock.h / 2.0;
+
+        double ax = a1.getX(), ay = a1.getY();
+        double bx = b1.getX(), by = b1.getY();
+
+        if (srcHoriz && dstHoriz) {
+            if (sox == dox) {
+                // Both stubs face the same way: meet just past the outer port,
+                // then drop straight in (no doubling back into the arrowhead).
+                double ex = (sox > 0) ? Math.max(ax, bx) : Math.min(ax, bx);
+                pts.add(new Point2D.Double(ex, ay));
+                pts.add(new Point2D.Double(ex, by));
+            } else if ((sox > 0 && bx >= ax) || (sox < 0 && bx <= ax)) {
+                // Facing each other with room between: Z through the midpoint.
+                double midx = (ax + bx) / 2;
+                pts.add(new Point2D.Double(midx, ay));
+                pts.add(new Point2D.Double(midx, by));
             } else {
-                double midx = (a1.getX() + b1.getX()) / 2;
-                pts.add(new Point2D.Double(midx, a1.getY()));
-                pts.add(new Point2D.Double(midx, b1.getY() + 14));
-                pts.add(new Point2D.Double(b1.getX(), b1.getY() + 14));
+                // Facing apart / overlapping: loop around the dst block.
+                double goY = (ay < dstCenterY) ? dstTop : dstBottom;
+                double extX = (sox > 0) ? Math.max(ax, dstRight) : Math.min(ax, dstLeft);
+                pts.add(new Point2D.Double(extX, ay));
+                pts.add(new Point2D.Double(extX, goY));
+                pts.add(new Point2D.Double(bx, goY));
             }
-            pts.add(b1);
-            pts.add(new Point2D.Double(b0.x, b0.y));
+        } else if (!srcHoriz && !dstHoriz) {
+            if (soy == doy) {
+                double ey = (soy > 0) ? Math.max(ay, by) : Math.min(ay, by);
+                pts.add(new Point2D.Double(ax, ey));
+                pts.add(new Point2D.Double(bx, ey));
+            } else if ((soy > 0 && by >= ay) || (soy < 0 && by <= ay)) {
+                double midy = (ay + by) / 2;
+                pts.add(new Point2D.Double(ax, midy));
+                pts.add(new Point2D.Double(bx, midy));
+            } else {
+                double goX = (ax < dstCenterX) ? dstLeft : dstRight;
+                double extY = (soy > 0) ? Math.max(ay, dstBottom) : Math.min(ay, dstTop);
+                pts.add(new Point2D.Double(ax, extY));
+                pts.add(new Point2D.Double(goX, extY));
+                pts.add(new Point2D.Double(goX, by));
+            }
+        } else if (srcHoriz) {
+            // Src horizontal, dst vertical. Single corner (bx,ay) works only if
+            // it leaves src forward in x and reaches b1 from its outward side.
+            boolean xOk = (sox > 0 && bx >= ax) || (sox < 0 && bx <= ax);
+            boolean yOk = (ay - by) * doy >= 0;
+            if (xOk && yOk) {
+                pts.add(new Point2D.Double(bx, ay));
+            } else {
+                // Detour to the port's outward side, then drop straight into b1.
+                double goY = (doy < 0) ? dstTop : dstBottom;
+                double extX = (sox > 0) ? Math.max(ax, dstRight) : Math.min(ax, dstLeft);
+                pts.add(new Point2D.Double(extX, ay));
+                pts.add(new Point2D.Double(extX, goY));
+                pts.add(new Point2D.Double(bx, goY));
+            }
         } else {
-            Point2D b1 = new Point2D.Double(b0.x - 14, b0.y);
-            if (b1.getX() >= a1.getX()) {
-                double midx = (a1.getX() + b1.getX()) / 2;
-                pts.add(new Point2D.Double(midx, a1.getY()));
-                pts.add(new Point2D.Double(midx, b1.getY()));
+            // Src vertical, dst horizontal. Corner (ax,by).
+            boolean yOk = (soy > 0 && by >= ay) || (soy < 0 && by <= ay);
+            boolean xOk = (ax - bx) * dox >= 0;
+            if (yOk && xOk) {
+                pts.add(new Point2D.Double(ax, by));
             } else {
-                double midy = (a1.getY() + b1.getY()) / 2;
-                pts.add(new Point2D.Double(a1.getX(), midy));
-                pts.add(new Point2D.Double(b1.getX(), midy));
+                double goX = (dox < 0) ? dstLeft : dstRight;
+                double extY = (soy > 0) ? Math.max(ay, dstBottom) : Math.min(ay, dstTop);
+                pts.add(new Point2D.Double(ax, extY));
+                pts.add(new Point2D.Double(goX, extY));
+                pts.add(new Point2D.Double(goX, by));
             }
-            pts.add(b1);
-            pts.add(new Point2D.Double(b0.x, b0.y));
         }
+
+        pts.add(b1);
+        pts.add(new Point2D.Double(b0.x, b0.y));
         return pts;
     }
 
     /** Convert auto-route to explicit waypoints for editing. */
     private void bakeWaypoints(Wire w) {
         if (w.hasCustomRoute()) return;
-        List<Point2D> pts = routeAuto(portPos(w.src), portPos(w.dst), w.dst.isCE());
-        w.waypoints.clear();
-        // Skip first (src port) and last (dst port) - store intermediate points
-        for (int i = 1; i < pts.size() - 1; i++) {
-            Point2D p = pts.get(i);
+        for (Point2D p : autoCorners(w))
             w.waypoints.add(new Point(snap((int) p.getX()), snap((int) p.getY())));
-        }
+        normalizeWaypoints(w);
     }
 
     /** Find which segment of a wire is at given point. Returns -1 if none. */
@@ -551,13 +693,14 @@ public class CanvasPanel extends JPanel {
             return;
         }
         if (draggingWire != null && draggingSegment >= 0) {
-            // Move segment by adjusting waypoints
-            // Segment i connects point i to point i+1 in route
-            // For waypoints: segment 0 = src to wp[0], segment 1 = wp[0] to wp[1], etc.
-            // So waypoint indices affected: seg-1 and seg (clamped to valid range)
+            // Move segment by adjusting waypoints.
+            // Route layout: [port, stub, wp0, wp1, ..., wpN, stub, port].
+            // Segment s connects route[s] to route[s+1], so the two waypoints it
+            // touches are wp[s-2] and wp[s-1] (either may be a fixed stub, out of
+            // range, in which case only the in-range waypoint moves).
             List<Point> wps = draggingWire.waypoints;
-            int wp1 = draggingSegment - 1;  // first waypoint of segment
-            int wp2 = draggingSegment;      // second waypoint of segment
+            int wp1 = draggingSegment - 2;  // first waypoint of segment
+            int wp2 = draggingSegment - 1;  // second waypoint of segment
 
             if (segmentHorizontal) {
                 // Horizontal segment: moving changes Y
@@ -617,8 +760,8 @@ public class CanvasPanel extends JPanel {
             repaint();
         }
         if (draggingWire != null) {
-            // Clean up redundant waypoints (collinear points)
-            cleanupWaypoints(draggingWire);
+            // Snap waypoints back onto the actual corners of the drawn route.
+            normalizeWaypoints(draggingWire);
             draggingWire = null;
             draggingSegment = -1;
             repaint();
@@ -627,36 +770,26 @@ public class CanvasPanel extends JPanel {
         resizingBlock = null;
     }
 
-    /** Remove redundant collinear waypoints. */
-    private void cleanupWaypoints(Wire w) {
-        List<Point> wps = w.waypoints;
-        if (wps.size() < 2) return;
-
-        // Build full point list including endpoints
-        List<Point2D> all = new ArrayList<>();
-        all.add(new Point2D.Double(portPos(w.src).x, portPos(w.src).y));
-        for (Point p : wps) all.add(new Point2D.Double(p.x, p.y));
-        all.add(new Point2D.Double(portPos(w.dst).x, portPos(w.dst).y));
-
-        // Find collinear intermediate points to remove
-        List<Integer> toRemove = new ArrayList<>();
-        for (int i = 1; i < all.size() - 1; i++) {
-            Point2D prev = all.get(i - 1);
-            Point2D cur = all.get(i);
-            Point2D next = all.get(i + 1);
-            // Check if cur is collinear (same X or same Y as both neighbors)
-            boolean sameX = (prev.getX() == cur.getX() && cur.getX() == next.getX());
-            boolean sameY = (prev.getY() == cur.getY() && cur.getY() == next.getY());
-            if (sameX || sameY) {
-                toRemove.add(i - 1);  // waypoint index = all index - 1
-            }
+    /**
+     * Re-derive waypoints so they equal the actual corners of the drawn route:
+     * one waypoint per direction change, none along a straight run. Drops
+     * collinear points and captures any corner orthogonalize() had to insert,
+     * keeping the draggable handles aligned with the visible bends.
+     */
+    private void normalizeWaypoints(Wire w) {
+        if (!w.hasCustomRoute()) return;
+        List<Point2D> pts = route(w);  // [port, stub, ...corners..., stub, port]
+        List<Point> corners = new ArrayList<>();
+        for (int i = 2; i < pts.size() - 2; i++) {
+            Point2D prev = pts.get(i - 1), cur = pts.get(i), next = pts.get(i + 1);
+            boolean sameX = prev.getX() == cur.getX() && cur.getX() == next.getX();
+            boolean sameY = prev.getY() == cur.getY() && cur.getY() == next.getY();
+            if (sameX || sameY) continue;  // not a corner, skip
+            corners.add(new Point(snap((int) Math.round(cur.getX())),
+                    snap((int) Math.round(cur.getY()))));
         }
-
-        // Remove from end to preserve indices
-        for (int i = toRemove.size() - 1; i >= 0; i--) {
-            int idx = toRemove.get(i);
-            if (idx >= 0 && idx < wps.size()) wps.remove(idx);
-        }
+        w.waypoints.clear();
+        w.waypoints.addAll(corners);
     }
 
     private void mouseMoved(MouseEvent e) {
