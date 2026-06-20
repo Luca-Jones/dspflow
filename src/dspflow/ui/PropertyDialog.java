@@ -20,9 +20,20 @@ public class PropertyDialog {
         switch (key) {
             case "width": return "bus width";
             case "fft_size": return "FFT size";
-            case "hann": return "Hann window";
+            case "hann": return "Hann Windowed";
             default: return key;
         }
+    }
+
+    /** Params edited as an on/off checkbox rather than a text field. */
+    private static boolean isBool(String key) {
+        return key.equals("hann");
+    }
+
+    /** A stored param string is "true" when non-empty and not "0". */
+    private static boolean boolValue(String v) {
+        String s = v == null ? "" : v.trim();
+        return !s.isEmpty() && !s.equals("0");
     }
 
     public static void edit(Window owner, Block b, Diagram d, CanvasPanel canvas) {
@@ -42,6 +53,7 @@ public class PropertyDialog {
         c.fill = GridBagConstraints.HORIZONTAL;
 
         Map<String, JTextField> fields = new LinkedHashMap<>();
+        Map<String, JCheckBox> checks = new LinkedHashMap<>();
         int row = 0;
 
         c.gridx = 0; c.gridy = row; c.weightx = 0;
@@ -53,6 +65,17 @@ public class PropertyDialog {
 
         for (Map.Entry<String, String> e : b.params.entrySet()) {
             if (e.getKey().equals("name")) continue;
+            // Boolean params render as a checkbox spanning both columns.
+            if (isBool(e.getKey())) {
+                JCheckBox cb = new JCheckBox(displayName(e.getKey()),
+                        boolValue(e.getValue()));
+                checks.put(e.getKey(), cb);
+                c.gridx = 0; c.gridy = row; c.weightx = 1; c.gridwidth = 2;
+                grid.add(cb, c);
+                c.gridwidth = 1;
+                row++;
+                continue;
+            }
             c.gridx = 0; c.gridy = row; c.weightx = 0;
             grid.add(new JLabel(displayName(e.getKey())), c);
             JTextField f = new JTextField(e.getValue(), 12);
@@ -70,6 +93,8 @@ public class PropertyDialog {
             else b.params.put("name", nm);
             for (Map.Entry<String, JTextField> e : fields.entrySet())
                 b.params.put(e.getKey(), e.getValue().getText().trim());
+            for (Map.Entry<String, JCheckBox> e : checks.entrySet())
+                b.params.put(e.getKey(), e.getValue().isSelected() ? "1" : "0");
             b.paramsChanged();
             d.pruneWires();
             canvas.repaint();

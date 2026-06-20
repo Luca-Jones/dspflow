@@ -7,12 +7,12 @@ the plots are generated with the matplotlib Python library.
 ## Dependencies
 
 - **JDK 11+**
-- **Python 3 with matplotlib**
+- **Python 3 with matplotlib and numpy**
 
 ### Option 1: Global install
 
 ```bash
-pip install matplotlib
+pip install matplotlib numpy
 ```
 
 ### Option 2: Virtual environment
@@ -20,7 +20,7 @@ pip install matplotlib
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install matplotlib
+pip install matplotlib numpy
 ```
 
 Run the app while venv is activated.

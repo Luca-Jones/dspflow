@@ -814,10 +814,7 @@ public class CanvasPanel extends JPanel {
         Point2D m = toModel(e.getPoint());
         Block b = blockAt(m.getX(), m.getY());
         if (b == null) return;
-        if (b instanceof ScopeSink || b instanceof SpectrumSink)
-            frame.showPlots();
-        else
-            PropertyDialog.edit(frame, b, diagram, this);
+        PropertyDialog.edit(frame, b, diagram, this);
     }
 
     private void wheel(MouseWheelEvent e) {

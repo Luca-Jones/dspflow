@@ -12,6 +12,7 @@ import java.util.List;
 
 import dspflow.model.Block;
 import dspflow.model.Diagram;
+import dspflow.model.Port;
 import dspflow.model.blocks.ScopeSink;
 import dspflow.model.blocks.SpectrumSink;
 
@@ -152,42 +153,40 @@ public final class PlotViewer {
     }
 
     private static void writeScopeCsv(Path dir, ScopeSink sc) throws IOException {
-        if (sc.data.isEmpty()) return;
-        int channels = sc.inputs.size();
+        writeSamplesCsv(dir, sc.label(), sc.inputs, sc.data);
+    }
+
+    /**
+     * Spectrum CSV holds the raw time-domain samples (the input to the FFT),
+     * since the transform itself now happens in the Python viewer.
+     */
+    private static void writeSpectrumCsv(Path dir, SpectrumSink sp) throws IOException {
+        writeSamplesCsv(dir, sp.label(), sp.inputs, sp.data);
+    }
+
+    /** One column per channel, one row per tick. */
+    private static void writeSamplesCsv(Path dir, String label,
+            List<Port> ports, List<long[]> rows) throws IOException {
+        if (rows.isEmpty()) return;
+        int channels = ports.size();
         StringBuilder sb = new StringBuilder(8192);
         sb.append("tick");
         for (int ch = 0; ch < channels; ch++)
-            sb.append(',').append(csvField(sc.inputs.get(ch).name));
+            sb.append(',').append(csvField(ports.get(ch).name));
         sb.append('\n');
-        for (int i = 0; i < sc.data.size(); i++) {
+        for (int i = 0; i < rows.size(); i++) {
             sb.append(i);
-            long[] row = sc.data.get(i);
+            long[] row = rows.get(i);
             for (int ch = 0; ch < channels; ch++)
                 sb.append(',').append(row[ch]);
             sb.append('\n');
         }
-        write(dir, sc.label(), sb.toString());
-    }
-
-    private static void writeSpectrumCsv(Path dir, SpectrumSink sp) throws IOException {
-        double[][] xy = sp.spectrumDb();
-        if (xy == null) return;
-        double[] x = xy[0], y = xy[1];
-        StringBuilder sb = new StringBuilder(8192);
-        sb.append("freq,magnitude_db\n");
-        for (int i = 0; i < x.length; i++)
-            sb.append(num(x[i])).append(',').append(num(y[i])).append('\n');
-        write(dir, sp.label(), sb.toString());
+        write(dir, label, sb.toString());
     }
 
     private static void write(Path dir, String label, String contents) throws IOException {
         Path out = dir.resolve(sanitize(label) + ".csv");
         Files.write(out, contents.getBytes(StandardCharsets.UTF_8));
-    }
-
-    /** A finite number as plain text, or empty for NaN/Inf. */
-    private static String num(double v) {
-        return (Double.isNaN(v) || Double.isInfinite(v)) ? "" : Double.toString(v);
     }
 
     /** Quote a header field only if it contains CSV-special characters. */
@@ -229,57 +228,57 @@ public final class PlotViewer {
 
     private static String scopeFigure(ScopeSink sc) {
         if (sc.data.isEmpty()) return null;
-        int channels = sc.inputs.size();
         StringBuilder sb = new StringBuilder();
         sb.append('{');
         kv(sb, "kind", "scope").append(',');
         kv(sb, "title", sc.label()).append(',');
         kv(sb, "xlabel", "tick").append(',');
         kv(sb, "ylabel", "value").append(',');
-        sb.append("\"series\":[");
-        for (int ch = 0; ch < channels; ch++) {
-            if (ch > 0) sb.append(',');
-            sb.append('{');
-            kv(sb, "name", sc.inputs.get(ch).name).append(',');
-            sb.append("\"y\":[");
-            for (int i = 0; i < sc.data.size(); i++) {
-                if (i > 0) sb.append(',');
-                sb.append(sc.data.get(i)[ch]);
-            }
-            sb.append("]}");
-        }
-        sb.append("]}");
+        seriesArray(sb, sc.inputs, sc.data);
+        sb.append('}');
         return sb.toString();
     }
 
+    /**
+     * The spectrum figure ships raw per-channel time samples plus the FFT
+     * parameters; the Python viewer (numpy) computes the transform and the dB
+     * magnitude. This keeps all the DSP-vs-plotting boundary in one place.
+     */
     private static String spectrumFigure(SpectrumSink sp) {
-        double[][] xy = sp.spectrumDb();
-        if (xy == null) return null;
+        if (sp.data.isEmpty()) return null;
         StringBuilder sb = new StringBuilder();
         sb.append('{');
         kv(sb, "kind", "spectrum").append(',');
         kv(sb, "title", sp.label()).append(',');
         kv(sb, "xlabel", "normalized frequency").append(',');
         kv(sb, "ylabel", "magnitude (dB)").append(',');
-        doubleArray(sb, "x", xy[0]).append(',');
-        doubleArray(sb, "y", xy[1]);
+        sb.append("\"fft_size\":").append(sp.fftSize()).append(',');
+        sb.append("\"hann\":").append(sp.hann()).append(',');
+        seriesArray(sb, sp.inputs, sp.data);
         sb.append('}');
         return sb.toString();
     }
 
-    private static StringBuilder kv(StringBuilder sb, String k, String v) {
-        return sb.append('"').append(k).append("\":\"").append(escape(v)).append('"');
-    }
-
-    private static StringBuilder doubleArray(StringBuilder sb, String k, double[] a) {
-        sb.append('"').append(k).append("\":[");
-        for (int i = 0; i < a.length; i++) {
-            if (i > 0) sb.append(',');
-            double v = a[i];
-            if (Double.isNaN(v) || Double.isInfinite(v)) sb.append('0');
-            else sb.append(v);
+    /** Emit "series":[{name,y:[...]}, ...] for one channel per port. */
+    private static StringBuilder seriesArray(StringBuilder sb,
+            List<Port> ports, List<long[]> rows) {
+        sb.append("\"series\":[");
+        for (int ch = 0; ch < ports.size(); ch++) {
+            if (ch > 0) sb.append(',');
+            sb.append('{');
+            kv(sb, "name", ports.get(ch).name).append(',');
+            sb.append("\"y\":[");
+            for (int i = 0; i < rows.size(); i++) {
+                if (i > 0) sb.append(',');
+                sb.append(rows.get(i)[ch]);
+            }
+            sb.append("]}");
         }
         return sb.append(']');
+    }
+
+    private static StringBuilder kv(StringBuilder sb, String k, String v) {
+        return sb.append('"').append(k).append("\":\"").append(escape(v)).append('"');
     }
 
     private static String escape(String s) {
