@@ -79,15 +79,23 @@ def main():
                 ax.legend(loc="upper right", fontsize="small")
             ax.set_xlim(0, 0.5)
         else:  # scope: overlay every channel on one axes
-            for s in spec.get("series", []):
+            series = spec.get("series", [])
+            for i, s in enumerate(series):
                 y = s["y"]
-                # steps-post mirrors the zero-order hold of the hardware
-                # signal, so slow (clock-enabled) channels read as staircases.
-                ax.plot(range(len(y)), y, drawstyle="steps-post",
-                        linewidth=1.0, label=s.get("name", ""))
-            if len(spec.get("series", [])) > 1:
+                color = "C%d" % (i % 10)
+                # Stem plot: each tick is a discrete sample, so zero-stuffed
+                # (interpolated) channels show their zeros as bare baseline
+                # stems rather than being hidden by a connecting line.
+                markerline, stemlines, baseline = ax.stem(
+                    range(len(y)), y, linefmt=color, markerfmt="o",
+                    basefmt="black", label=s.get("name", ""))
+                markerline.set_markersize(3)
+                markerline.set_color(color)
+                stemlines.set_linewidth(1.0)
+                baseline.set_linewidth(0.5)
+                baseline.set_alpha(0.5)
+            if len(series) > 1:
                 ax.legend(loc="upper right", fontsize="small")
-            ax.axhline(0, color="black", linewidth=0.5, alpha=0.5)
 
         ax.set_title(spec.get("title", "DSPFlow"))
         ax.set_xlabel(spec.get("xlabel", ""))
