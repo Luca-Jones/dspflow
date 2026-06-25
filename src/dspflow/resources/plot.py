@@ -31,7 +31,15 @@ def main():
     with open(sys.argv[1], "r") as fh:
         job = json.load(fh)
 
+    import matplotlib
     import matplotlib.pyplot as plt
+
+    if matplotlib.get_backend().lower() == "agg":
+        sys.stderr.write(
+            "No GUI backend available (matplotlib is using non-interactive 'agg'),\n"
+            "so plot windows cannot open. Install a GUI backend, e.g.:\n"
+            "    pip install PyQt6\n")
+        return 1
 
     figures = job.get("figures", [])
     if not figures:
