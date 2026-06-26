@@ -132,17 +132,33 @@ public class MainFrame extends JFrame {
         p.add(selectBtn);
         p.add(Box.createVerticalStrut(8));
 
+        // Grouping for the known types (visual ordering only). Any block that is
+        // registered in BlockLibrary.TYPES but not listed here is appended to a
+        // trailing "Other" group, so new block types appear in the palette
+        // automatically without having to edit this list.
         String[][] groups = {
-            {"Constant", "Impulse", "Sine", "Clock"},
-            {"Delay", "Sum", "Mult", "Shift"},
+            {"Constant", "Impulse", "Sine", "Clock", "Gauss", "White", "Pink"},
+            {"Delay", "Sum", "Mult", "Shift", "SignExt"},
             {"Decim", "Interp"},
             {"Scope", "Spectrum"},
             {"Note"}
         };
+        java.util.Set<String> grouped = new java.util.LinkedHashSet<>();
+        for (String[] grp : groups) for (String t : grp) grouped.add(t);
+
         for (String[] grp : groups) {
-            for (String t : grp) p.add(paletteButton(t, t));
+            for (String t : grp)
+                if (java.util.Arrays.asList(BlockLibrary.TYPES).contains(t))
+                    p.add(paletteButton(t, t));
             p.add(Box.createVerticalStrut(8));
         }
+        boolean anyOther = false;
+        for (String t : BlockLibrary.TYPES) {
+            if (grouped.contains(t)) continue;
+            p.add(paletteButton(t, t));
+            anyOther = true;
+        }
+        if (anyOther) p.add(Box.createVerticalStrut(8));
         p.add(Box.createVerticalGlue());
 
         JScrollPane sp = new JScrollPane(p, ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED,
