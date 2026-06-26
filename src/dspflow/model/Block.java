@@ -52,10 +52,23 @@ public abstract class Block {
     public String glyph() { return type(); }
 
     /** Caption drawn under the block. A user-set "name" param wins verbatim;
-     *  otherwise a per-type default like "Sine 1", "Sine 2", "Const 1". */
+     *  otherwise a lowercase camelCase default like "sine1" / "shiftRegister2".
+     *  Default labels feed net names ("label.port"), so they stay identifier-safe. */
     public String label() {
         String n = params.get("name");
-        return (n != null && !n.isEmpty()) ? n : type() + " " + displayNum;
+        return (n != null && !n.isEmpty()) ? n : camelCase(type()) + displayNum;
+    }
+
+    /** Lowercase, spaces -> camelCase: first word lower, later words Capitalized,
+     *  joined (e.g. "Shift Register" -> "shiftRegister", "Sine" -> "sine"). */
+    public static String camelCase(String s) {
+        StringBuilder b = new StringBuilder();
+        for (String w : s.trim().split("\\s+")) {
+            if (w.isEmpty()) continue;
+            if (b.length() == 0) b.append(w.toLowerCase());
+            else b.append(Character.toUpperCase(w.charAt(0))).append(w.substring(1).toLowerCase());
+        }
+        return b.toString();
     }
 
     /** True if outputs depend combinationally on current-tick inputs. */
@@ -134,11 +147,17 @@ public abstract class Block {
     /** ponytail: tiny self-check (no test harness in repo). Run:
      *  java -cp out dspflow.model.Block */
     public static void main(String[] a) {
+        assert camelCase("Sine").equals("sine") : camelCase("Sine");
+        assert camelCase("Shift Register").equals("shiftRegister") : camelCase("Shift Register");
+        assert camelCase("  A  B  C ").equals("aBC") : camelCase("  A  B  C ");
         Diagram d = new Diagram();
-        Block s1 = stub("Sine"), c1 = stub("Const"), s2 = stub("Sine");
+        Block s1 = stub("Sine"), c1 = stub("Shift Register"), s2 = stub("Sine");
         d.add(s1); d.add(c1); d.add(s2);
         assert s1.displayNum == 1 && s2.displayNum == 2 && c1.displayNum == 1;
-        assert s1.label().equals("Sine 1") && s2.label().equals("Sine 2") && c1.label().equals("Const 1");
+        assert s1.label().equals("sine1") && s2.label().equals("sine2")
+            && c1.label().equals("shiftRegister1") : c1.label();
+        s1.params.put("name", "myCustom");   // user name wins verbatim
+        assert s1.label().equals("myCustom");
         d.remove(s1);                 // deleting s1 must NOT renumber s2
         assert d.nextDisplayNumCheck("Sine") == 3 && s2.displayNum == 2;
         System.out.println("Block self-check OK");
