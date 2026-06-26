@@ -23,6 +23,7 @@ public class MainFrame extends JFrame {
     private JToggleButton selectBtn;
     private ButtonGroup paletteGroup;
     private File currentFile;
+    private boolean darkMode = false;  // durable pref, re-applied when canvas is recreated
 
     public MainFrame() {
         super("DSPFlow");
@@ -75,7 +76,7 @@ public class MainFrame extends JFrame {
         view.add(netNames);
         view.addSeparator();
         JCheckBoxMenuItem darkMode = new JCheckBoxMenuItem("Dark mode", false);
-        darkMode.addActionListener(e -> canvas.setDarkMode(darkMode.isSelected()));
+        darkMode.addActionListener(e -> { this.darkMode = darkMode.isSelected(); canvas.setDarkMode(this.darkMode); });
         view.add(darkMode);
         mb.add(view);
 
@@ -287,6 +288,7 @@ public class MainFrame extends JFrame {
         setTitle(f == null ? "DSPFlow" : "DSPFlow - " + f.getName());
         remove(canvas);
         canvas = new CanvasPanel(this, diagram);
+        canvas.setDarkMode(darkMode);  // respect pref across file open (fresh canvas defaults to light)
         add(canvas, BorderLayout.CENTER);
         revalidate();
         canvas.repaint();
