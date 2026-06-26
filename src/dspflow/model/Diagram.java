@@ -12,8 +12,22 @@ public class Diagram {
 
     public void add(Block b) {
         b.id = nextId++;
+        b.displayNum = nextDisplayNum(b.type());
         blocks.add(b);
     }
+
+    /** Next per-type display index. Monotonic within a type for the session:
+     *  one past the highest displayNum currently in use, so deleting a block
+     *  never renumbers the survivors (no confusing relabels on the canvas). */
+    private int nextDisplayNum(String type) {
+        int max = 0;
+        for (Block b : blocks)
+            if (b.type().equals(type)) max = Math.max(max, b.displayNum);
+        return max + 1;
+    }
+
+    /** Test hook for Block.main self-check. */
+    int nextDisplayNumCheck(String type) { return nextDisplayNum(type); }
 
     public void remove(Block b) {
         blocks.remove(b);
@@ -127,6 +141,11 @@ public class Diagram {
                 }
             }
         }
+        // displayNum isn't serialized; recompute per-type by block order so
+        // labels come out contiguous (Sine 1, Sine 2, ...) regardless of ids.
+        Map<String, Integer> typeCount = new HashMap<>();
+        for (Block b : d.blocks)
+            b.displayNum = typeCount.merge(b.type(), 1, Integer::sum);
         for (Block b : d.blocks) b.paramsChanged();
         Wire curWire = null;
         for (String[] t : wireLines) {

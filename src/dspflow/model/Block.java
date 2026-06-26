@@ -22,6 +22,9 @@ import java.util.List;
  */
 public abstract class Block {
     public int id;
+    /** Per-type display index (1-based), set by Diagram. Distinct from the
+     *  global unique {@link #id} used for wiring/serialization. */
+    public int displayNum;
     public int x, y, w = 110, h = 60;
     public int rotation = 0;  // 0=0°, 1=90°, 2=180°, 3=270° clockwise
     public boolean flipH = false;  // horizontal flip
@@ -48,10 +51,11 @@ public abstract class Block {
     /** Big symbol drawn in the middle of the block. */
     public String glyph() { return type(); }
 
-    /** Caption drawn under the block. */
+    /** Caption drawn under the block. A user-set "name" param wins verbatim;
+     *  otherwise a per-type default like "Sine 1", "Sine 2", "Const 1". */
     public String label() {
         String n = params.get("name");
-        return (n != null && !n.isEmpty()) ? n : type() + " " + id;
+        return (n != null && !n.isEmpty()) ? n : type() + " " + displayNum;
     }
 
     /** True if outputs depend combinationally on current-tick inputs. */
@@ -125,6 +129,22 @@ public abstract class Block {
     public String ps(String key, String def) {
         String v = params.get(key);
         return v == null ? def : v;
+    }
+
+    /** ponytail: tiny self-check (no test harness in repo). Run:
+     *  java -cp out dspflow.model.Block */
+    public static void main(String[] a) {
+        Diagram d = new Diagram();
+        Block s1 = stub("Sine"), c1 = stub("Const"), s2 = stub("Sine");
+        d.add(s1); d.add(c1); d.add(s2);
+        assert s1.displayNum == 1 && s2.displayNum == 2 && c1.displayNum == 1;
+        assert s1.label().equals("Sine 1") && s2.label().equals("Sine 2") && c1.label().equals("Const 1");
+        d.remove(s1);                 // deleting s1 must NOT renumber s2
+        assert d.nextDisplayNumCheck("Sine") == 3 && s2.displayNum == 2;
+        System.out.println("Block self-check OK");
+    }
+    private static Block stub(String t) {
+        return new Block() { public String type() { return t; } public void evaluate(long x) {} };
     }
 
     /** Wrap v to a signed two's-complement value of the given bit width. */
