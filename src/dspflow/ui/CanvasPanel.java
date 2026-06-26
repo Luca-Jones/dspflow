@@ -1081,11 +1081,12 @@ public class CanvasPanel extends JPanel {
                 getWidth() / scale, getHeight() / scale);
         g2.setColor(GRID);
         int step = 20;
+        double d = 1.6;  // dot diameter (model units)
         int x0 = (int) Math.floor(vis.getMinX() / step) * step;
         int y0 = (int) Math.floor(vis.getMinY() / step) * step;
         for (int x = x0; x < vis.getMaxX(); x += step)
             for (int y = y0; y < vis.getMaxY(); y += step)
-                g2.fillRect(x, y, 1, 1);
+                g2.fill(new Ellipse2D.Double(x - d / 2, y - d / 2, d, d));
     }
 
     private void paintWire(Graphics2D g2, Wire w) {
