@@ -614,6 +614,28 @@ public class CanvasPanel extends JPanel {
         return -1;
     }
 
+    /**
+     * Point halfway along a polyline by arc length. Unlike indexing the middle
+     * vertex, this lands on a segment, so a straight 2-point net gets its label
+     * centred on the run instead of sitting on the destination port.
+     */
+    private static Point2D polylineMidpoint(List<Point2D> pts) {
+        double total = 0;
+        for (int i = 0; i + 1 < pts.size(); i++) total += pts.get(i).distance(pts.get(i + 1));
+        double half = total / 2;
+        for (int i = 0; i + 1 < pts.size(); i++) {
+            double seg = pts.get(i).distance(pts.get(i + 1));
+            if (half <= seg || i + 2 == pts.size()) {
+                double t = seg == 0 ? 0 : half / seg;
+                return new Point2D.Double(
+                        pts.get(i).getX() + t * (pts.get(i + 1).getX() - pts.get(i).getX()),
+                        pts.get(i).getY() + t * (pts.get(i + 1).getY() - pts.get(i).getY()));
+            }
+            half -= seg;
+        }
+        return pts.get(0);
+    }
+
     /** Check if segment is horizontal (vs vertical). */
     private boolean isHorizontal(List<Point2D> pts, int seg) {
         if (seg < 0 || seg + 1 >= pts.size()) return false;
@@ -1236,9 +1258,7 @@ public class CanvasPanel extends JPanel {
             g2.setFont(g2.getFont().deriveFont(9f));
             g2.setColor(theme.netLabel);
             String netName = w.src.block.label() + "." + w.src.name;
-            // Find midpoint of wire
-            int midIdx = pts.size() / 2;
-            Point2D mid = pts.get(midIdx);
+            Point2D mid = polylineMidpoint(pts);
             g2.drawString(netName, (int) mid.getX() + 3, (int) mid.getY() - 3);
         }
 
