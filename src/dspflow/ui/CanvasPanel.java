@@ -209,7 +209,10 @@ public class CanvasPanel extends JPanel {
         return new Point2D.Double((p.x - tx) / scale, (p.y - ty) / scale);
     }
 
-    private static int snap(double v) { return (int) Math.round(v / 10) * 10; }
+    /** Spacing of the dot grid; everything (blocks, waypoints, route corners) snaps to it. */
+    static final int GRID_STEP = 20;
+
+    private static int snap(double v) { return (int) Math.round(v / GRID_STEP) * GRID_STEP; }
 
     public void setPlacing(String type) {
         placing = type;
@@ -454,10 +457,18 @@ public class CanvasPanel extends JPanel {
         return out;
     }
 
-    /** Interior corner points of the auto-route (between the two stubs). */
+    /**
+     * Interior corner points of the auto-route (between the two stubs), snapped
+     * to the dot grid so auto-routed wires run dot-to-dot. orthogonalize() only
+     * inserts L-corners whose coordinates are copied from these (already snapped)
+     * neighbours, so the whole drawn polyline stays on the grid.
+     */
     private List<Point2D> autoCorners(Wire w) {
         List<Point2D> pts = routeAuto(w);
-        return new ArrayList<>(pts.subList(2, pts.size() - 2));
+        List<Point2D> corners = new ArrayList<>();
+        for (Point2D p : pts.subList(2, pts.size() - 2))
+            corners.add(new Point2D.Double(snap(p.getX()), snap(p.getY())));
+        return corners;
     }
 
     /** Get stub point extending outward from port based on its edge. */
