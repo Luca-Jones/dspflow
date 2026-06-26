@@ -1,35 +1,76 @@
 #!/usr/bin/env python3
 """DSPFlow figure viewer.
 
-Reads one JSON job describing every sink in the diagram and opens an
+Reads one CSV job describing every sink in the diagram and opens an
 interactive matplotlib window per sink, then blocks in plt.show() until the
 user closes them. Java records the raw signals; this script plots them and
 computes the spectrum FFT (numpy).
 
 Dependencies: matplotlib and numpy.
 
-Usage:  python3 plot.py <job.json>
+Usage:  python3 plot.py <job.csv>
 
-Job format:
-  {"figures":[
-     {"kind":"scope","title":"Scope 4","xlabel":"tick","ylabel":"value",
-      "series":[{"name":"in1","y":[...]}, ...]},
-     {"kind":"spectrum","title":"Spectrum 5","xlabel":"normalized frequency",
-      "ylabel":"magnitude (dB)","fft_size":1024,"hann":true,
-      "series":[{"name":"in1","y":[...]}, ...]}
-  ]}
+Job format (plain CSV, no JSON):
+  Each figure is one block. A block is a run of "# key,value" metadata lines
+  followed by a data table. Blocks are separated by a blank line.
+
+    # kind,scope
+    # title,Scope 4
+    # xlabel,tick
+    # ylabel,value
+    tick,src_1.out,src_2.out
+    0,3,7
+    1,4,8
+
+  The table's first row is the header: column 0 is "tick" (ignored), the rest
+  name one series each. Every following row is one tick; column i (i>0) is
+  that series' sample. Spectrum blocks add two extra metadata lines:
+
+    # fft_size,1024
+    # hann,true
+
+  Standard CSV quoting applies to metadata values and series names.
 """
-import json
+import csv
 import sys
+
+
+def parse_jobs(path):
+    """Return [(meta dict, header list|None, rows list-of-lists), ...] per figure."""
+    figures = []
+    meta, header, rows = {}, None, []
+
+    def flush():
+        nonlocal meta, header, rows
+        if meta or header:
+            figures.append((meta, header, rows))
+        meta, header, rows = {}, None, []
+
+    with open(path, newline="") as fh:
+        for row in csv.reader(fh):
+            if not row:  # blank line separates figures
+                flush()
+            elif row[0].startswith("#"):  # "# key" in col 0, value in col 1
+                meta[row[0].lstrip("# ").strip()] = row[1] if len(row) > 1 else ""
+            elif header is None:
+                header = row
+            else:
+                rows.append(row)
+    flush()
+    return figures
+
+
+def columns(header, rows):
+    """Return [(name, [float,...]), ...] for each series column (skip tick)."""
+    return [(header[i], [float(r[i]) for r in rows]) for i in range(1, len(header))]
 
 
 def main():
     if len(sys.argv) != 2:
-        sys.stderr.write("usage: plot.py <job.json>\n")
+        sys.stderr.write("usage: plot.py <job.csv>\n")
         return 2
 
-    with open(sys.argv[1], "r") as fh:
-        job = json.load(fh)
+    figures = parse_jobs(sys.argv[1])
 
     import matplotlib
     import matplotlib.pyplot as plt
@@ -41,23 +82,23 @@ def main():
             "    pip install PyQt6\n")
         return 1
 
-    figures = job.get("figures", [])
     if not figures:
         sys.stderr.write("no figures in job\n")
         return 1
 
-    for spec in figures:
-        kind = spec.get("kind", "scope")
+    for meta, header, rows in figures:
+        kind = meta.get("kind", "scope")
+        title = meta.get("title", "DSPFlow")
+        series = columns(header, rows) if header else []
         fig, ax = plt.subplots(figsize=(10, 5))
-        fig.canvas.manager.set_window_title(spec.get("title", "DSPFlow"))
+        fig.canvas.manager.set_window_title(title)
 
         if kind == "spectrum":
             import numpy as np
-            n = int(spec.get("fft_size", 1024))
-            win = np.hanning(n) if spec.get("hann", True) else np.ones(n)
-            series = spec.get("series", [])
-            for s in series:
-                y = np.asarray(s.get("y", []), dtype=float)
+            n = int(meta.get("fft_size", 1024))
+            win = np.hanning(n) if meta.get("hann", "true") == "true" else np.ones(n)
+            for name, y in series:
+                y = np.asarray(y, dtype=float)
                 # take the last n samples, right-aligned in an n-wide buffer
                 # (zero-padded in front when fewer than n are available)
                 seg = y[-n:]
@@ -82,21 +123,19 @@ def main():
                 # sits in a single bin, with -inf empty neighbours) is still
                 # visible -- a bare line can't draw an isolated point.
                 ax.plot(freq, db, linewidth=1.0, marker=".", markersize=3,
-                        label=s.get("name", ""))
+                        label=name)
             if len(series) > 1:
                 ax.legend(loc="upper right", fontsize="small")
             ax.set_xlim(0, 0.5)
         else:  # scope: overlay every channel on one axes
-            series = spec.get("series", [])
-            for i, s in enumerate(series):
-                y = s["y"]
+            for i, (name, y) in enumerate(series):
                 color = "C%d" % (i % 10)
                 # Stem plot: each tick is a discrete sample, so zero-stuffed
                 # (interpolated) channels show their zeros as bare baseline
                 # stems rather than being hidden by a connecting line.
                 markerline, stemlines, baseline = ax.stem(
                     range(len(y)), y, linefmt=color, markerfmt="o",
-                    basefmt="black", label=s.get("name", ""))
+                    basefmt="black", label=name)
                 markerline.set_markersize(3)
                 markerline.set_color(color)
                 stemlines.set_linewidth(1.0)
@@ -105,9 +144,9 @@ def main():
             if len(series) > 1:
                 ax.legend(loc="upper right", fontsize="small")
 
-        ax.set_title(spec.get("title", "DSPFlow"))
-        ax.set_xlabel(spec.get("xlabel", ""))
-        ax.set_ylabel(spec.get("ylabel", ""))
+        ax.set_title(title)
+        ax.set_xlabel(meta.get("xlabel", ""))
+        ax.set_ylabel(meta.get("ylabel", ""))
         ax.grid(True, alpha=0.3)
         fig.tight_layout()
 

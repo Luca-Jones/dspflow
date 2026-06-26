@@ -20,7 +20,7 @@ import dspflow.model.blocks.SpectrumSink;
  * Displays simulation results in interactive matplotlib windows.
  *
  * <p>Design: Java owns all the DSP. After a run, this serializes every sink's
- * data into a single JSON job and launches the bundled {@code plot.py} via the
+ * data into a single CSV job and launches the bundled {@code plot.py} via the
  * system {@code python3}. That one Python process opens an interactive window
  * per sink (scope channels overlaid on one axes) and blocks in {@code plt.show()}
  * until the user closes them. Nothing is linked into the JVM, so the jar stays
@@ -58,8 +58,8 @@ public final class PlotViewer {
      */
     public static void show(Diagram diagram, java.util.function.Consumer<String> onError)
             throws PlotException {
-        String json = buildJob(diagram);
-        if (json == null)
+        String job = buildJob(diagram);
+        if (job == null)
             throw new PlotException("Nothing to plot - no scopes or spectrums, or no data. Press Run first.");
 
         // Dump every sink's raw data to CSV in the working dir before plotting,
@@ -70,8 +70,8 @@ public final class PlotViewer {
         Path jobPath;
         try {
             scriptPath = extractScript();
-            jobPath = Files.createTempFile("dspflow_job", ".json");
-            Files.write(jobPath, json.getBytes(StandardCharsets.UTF_8));
+            jobPath = Files.createTempFile("dspflow_job", ".csv");
+            Files.write(jobPath, job.getBytes(StandardCharsets.UTF_8));
             jobPath.toFile().deleteOnExit();
         } catch (IOException e) {
             throw new PlotException("Could not prepare plot job: " + e.getMessage(), e);
@@ -206,37 +206,35 @@ public final class PlotViewer {
         return s.isEmpty() ? "sink" : s;
     }
 
-    // ---- JSON job construction (hand-rolled; we only emit what we control) ----
+    // ---- CSV job construction (one block per figure; format documented in plot.py) ----
 
-    /** Builds the multi-figure job, or null if there is nothing with data. */
+    /**
+     * Builds the multi-figure job as CSV, or null if there is nothing with
+     * data. Each figure is a block of {@code # key,value} metadata lines
+     * followed by a {@code tick,<series>...} data table; blocks are separated
+     * by a blank line. See plot.py for the exact format.
+     */
     private static String buildJob(Diagram diagram) {
         StringBuilder sb = new StringBuilder(8192);
-        sb.append("{\"figures\":[");
         boolean any = false;
         for (Block b : diagram.blocks) {
-            String fig = null;
-            if (b instanceof ScopeSink sc) fig = scopeFigure(sc);
-            else if (b instanceof SpectrumSink sp) fig = spectrumFigure(sp);
-            if (fig == null) continue;
-            if (any) sb.append(',');
-            sb.append(fig);
-            any = true;
+            boolean wrote = false;
+            if (b instanceof ScopeSink sc) wrote = scopeFigure(sb, any, sc);
+            else if (b instanceof SpectrumSink sp) wrote = spectrumFigure(sb, any, sp);
+            any |= wrote;
         }
-        sb.append("]}");
         return any ? sb.toString() : null;
     }
 
-    private static String scopeFigure(ScopeSink sc) {
-        if (sc.data.isEmpty()) return null;
-        StringBuilder sb = new StringBuilder();
-        sb.append('{');
-        kv(sb, "kind", "scope").append(',');
-        kv(sb, "title", sc.label()).append(',');
-        kv(sb, "xlabel", "tick").append(',');
-        kv(sb, "ylabel", "value").append(',');
-        seriesArray(sb, sc.inputs, sc.data);
-        sb.append('}');
-        return sb.toString();
+    private static boolean scopeFigure(StringBuilder sb, boolean precededByFigure, ScopeSink sc) {
+        if (sc.data.isEmpty()) return false;
+        if (precededByFigure) sb.append('\n');
+        meta(sb, "kind", "scope");
+        meta(sb, "title", sc.label());
+        meta(sb, "xlabel", "tick");
+        meta(sb, "ylabel", "value");
+        seriesTable(sb, sc.inputs, sc.data);
+        return true;
     }
 
     /**
@@ -244,37 +242,32 @@ public final class PlotViewer {
      * parameters; the Python viewer (numpy) computes the transform and the dB
      * magnitude. This keeps all the DSP-vs-plotting boundary in one place.
      */
-    private static String spectrumFigure(SpectrumSink sp) {
-        if (sp.data.isEmpty()) return null;
-        StringBuilder sb = new StringBuilder();
-        sb.append('{');
-        kv(sb, "kind", "spectrum").append(',');
-        kv(sb, "title", sp.label()).append(',');
-        kv(sb, "xlabel", "normalized frequency").append(',');
-        kv(sb, "ylabel", "magnitude (dB)").append(',');
-        sb.append("\"fft_size\":").append(sp.fftSize()).append(',');
-        sb.append("\"hann\":").append(sp.hann()).append(',');
-        seriesArray(sb, sp.inputs, sp.data);
-        sb.append('}');
-        return sb.toString();
+    private static boolean spectrumFigure(StringBuilder sb, boolean precededByFigure, SpectrumSink sp) {
+        if (sp.data.isEmpty()) return false;
+        if (precededByFigure) sb.append('\n');
+        meta(sb, "kind", "spectrum");
+        meta(sb, "title", sp.label());
+        meta(sb, "xlabel", "normalized frequency");
+        meta(sb, "ylabel", "magnitude (dB)");
+        meta(sb, "fft_size", Integer.toString(sp.fftSize()));
+        meta(sb, "hann", Boolean.toString(sp.hann()));
+        seriesTable(sb, sp.inputs, sp.data);
+        return true;
     }
 
-    /** Emit "series":[{name,y:[...]}, ...] for one channel per port. */
-    private static StringBuilder seriesArray(StringBuilder sb,
-            List<Port> ports, List<long[]> rows) {
-        sb.append("\"series\":[");
-        for (int ch = 0; ch < ports.size(); ch++) {
-            if (ch > 0) sb.append(',');
-            sb.append('{');
-            kv(sb, "name", seriesName(ports.get(ch))).append(',');
-            sb.append("\"y\":[");
-            for (int i = 0; i < rows.size(); i++) {
-                if (i > 0) sb.append(',');
-                sb.append(rows.get(i)[ch]);
-            }
-            sb.append("]}");
+    /** Header row "tick,<name>,..." then one data row per tick. */
+    private static void seriesTable(StringBuilder sb, List<Port> ports, List<long[]> rows) {
+        sb.append("tick");
+        for (Port p : ports)
+            sb.append(',').append(csvField(seriesName(p)));
+        sb.append('\n');
+        for (int i = 0; i < rows.size(); i++) {
+            sb.append(i);
+            long[] row = rows.get(i);
+            for (int ch = 0; ch < ports.size(); ch++)
+                sb.append(',').append(row[ch]);
+            sb.append('\n');
         }
-        return sb.append(']');
     }
 
     /**
@@ -287,25 +280,8 @@ public final class PlotViewer {
         return d == null ? p.name : d.block.label() + "." + d.name;
     }
 
-    private static StringBuilder kv(StringBuilder sb, String k, String v) {
-        return sb.append('"').append(k).append("\":\"").append(escape(v)).append('"');
-    }
-
-    private static String escape(String s) {
-        StringBuilder b = new StringBuilder(s.length() + 8);
-        for (int i = 0; i < s.length(); i++) {
-            char c = s.charAt(i);
-            switch (c) {
-                case '"':  b.append("\\\""); break;
-                case '\\': b.append("\\\\"); break;
-                case '\n': b.append("\\n");  break;
-                case '\r': b.append("\\r");  break;
-                case '\t': b.append("\\t");  break;
-                default:
-                    if (c < 0x20) b.append(String.format("\\u%04x", (int) c));
-                    else b.append(c);
-            }
-        }
-        return b.toString();
+    /** Emit a "# key,value" metadata line, quoting the value if needed. */
+    private static void meta(StringBuilder sb, String k, String v) {
+        sb.append("# ").append(k).append(',').append(csvField(v)).append('\n');
     }
 }
