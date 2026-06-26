@@ -3,6 +3,7 @@ package dspflow.ui;
 import java.awt.*;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 import javax.swing.*;
 
 import dspflow.model.Block;
@@ -27,9 +28,13 @@ public class PropertyDialog {
         }
     }
 
+    // Explicit set, not value-sniffing: width/seed/period are also "0"/"1"-storable
+    // but are numeric, not boolean. Only keys that are semantically on/off belong here.
+    private static final Set<String> BOOL_KEYS = Set.of("hann", "cosine", "signed");
+
     /** Params edited as an on/off checkbox rather than a text field. */
     private static boolean isBool(String key) {
-        return key.equals("hann");
+        return BOOL_KEYS.contains(key);
     }
 
     /** Parse a field's text as a double, falling back on malformed input. */
