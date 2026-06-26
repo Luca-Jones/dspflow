@@ -69,11 +69,75 @@ public class CanvasPanel extends JPanel {
     private List<ClipboardEntry> clipboard = new ArrayList<>();
     private List<ClipboardWire> clipboardWires = new ArrayList<>();
 
-    private static final Color BG = new Color(0xF6F7F9);
-    private static final Color GRID = new Color(0xE2E5EA);
-    private static final Color WIRE = new Color(0x4A7A6F);
-    private static final Color SEL = new Color(0xE8861A);
-    private static final Color BORDER = new Color(0x7A8290);
+    /** All canvas colors, gathered so light/dark switch cleanly. */
+    static final class Theme {
+        Color bg, grid, wire, sel, border;
+        Color glyph, caption, label, busLabel, netLabel;       // text on/near blocks
+        Color blockFill, scopeFill, sourceFill, clockFill;     // fillFor()
+        Color noteFill, noteBorder, noteText;                  // sticky notes
+        Color portInput, portOutput, portCE, portFloat;        // ports
+        Color shadow;                                          // drop shadow (with alpha)
+    }
+
+    private static final Theme LIGHT = new Theme();
+    private static final Theme DARK = new Theme();
+    static {
+        LIGHT.bg = new Color(0xF6F7F9);
+        LIGHT.grid = new Color(0xE2E5EA);
+        LIGHT.wire = new Color(0x4A7A6F);
+        LIGHT.sel = new Color(0xE8861A);
+        LIGHT.border = new Color(0x7A8290);
+        LIGHT.glyph = new Color(0x2B3340);
+        LIGHT.caption = new Color(0x6B7280);
+        LIGHT.label = new Color(0x6B7280);
+        LIGHT.busLabel = new Color(0x9AA0AA);
+        LIGHT.netLabel = new Color(0x5A6A7A);
+        LIGHT.blockFill = Color.WHITE;
+        LIGHT.scopeFill = new Color(0xE9F1FB);
+        LIGHT.sourceFill = new Color(0xFDF6E3);
+        LIGHT.clockFill = new Color(0xF3EAF8);
+        LIGHT.noteFill = new Color(0xFFF9C4);
+        LIGHT.noteBorder = new Color(0xF9A825);
+        LIGHT.noteText = new Color(0x5D4037);
+        LIGHT.portInput = new Color(0x3B82F6);
+        LIGHT.portOutput = new Color(0x22C55E);
+        LIGHT.portCE = new Color(0x8E5BAE);
+        LIGHT.portFloat = new Color(0xD05050);
+        LIGHT.shadow = new Color(0, 0, 0, 18);
+
+        DARK.bg = new Color(0x1E2127);
+        DARK.grid = new Color(0x363B44);
+        DARK.wire = new Color(0x5FAE9C);
+        DARK.sel = new Color(0xF0A030);
+        DARK.border = new Color(0x8A93A3);
+        DARK.glyph = new Color(0xE6E9EF);
+        DARK.caption = new Color(0x9AA3B2);
+        DARK.label = new Color(0x9AA3B2);
+        DARK.busLabel = new Color(0x7A828F);
+        DARK.netLabel = new Color(0x9FB0C0);
+        DARK.blockFill = new Color(0x2A2E36);
+        DARK.scopeFill = new Color(0x24323F);
+        DARK.sourceFill = new Color(0x37331F);
+        DARK.clockFill = new Color(0x33293A);
+        DARK.noteFill = new Color(0x4A4220);
+        DARK.noteBorder = new Color(0xC9981F);
+        DARK.noteText = new Color(0xE8D8B0);
+        DARK.portInput = new Color(0x5B9BF6);
+        DARK.portOutput = new Color(0x3FD06B);
+        DARK.portCE = new Color(0xAE7BCE);
+        DARK.portFloat = new Color(0xE07070);
+        DARK.shadow = new Color(0, 0, 0, 60);
+    }
+
+    private Theme theme = LIGHT;
+
+    public boolean isDarkMode() { return theme == DARK; }
+
+    public void setDarkMode(boolean dark) {
+        theme = dark ? DARK : LIGHT;
+        setBackground(theme.bg);
+        repaint();
+    }
 
     // Display toggles
     private boolean showNetNames = false;
@@ -87,7 +151,7 @@ public class CanvasPanel extends JPanel {
     public CanvasPanel(MainFrame frame, Diagram diagram) {
         this.frame = frame;
         this.diagram = diagram;
-        setBackground(BG);
+        setBackground(theme.bg);
         setFocusable(true);
 
         MouseAdapter ma = new MouseAdapter() {
@@ -322,7 +386,41 @@ public class CanvasPanel extends JPanel {
         out.add(new Point2D.Double(a0.x, a0.y));
         out.addAll(chain);
         out.add(new Point2D.Double(b0.x, b0.y));
+        return simplify(out);
+    }
+
+    /**
+     * Collapse coincident points and merge collinear runs in an orthogonal
+     * polyline. Removes the zero-length and redundant segments produced when
+     * stub/corner anchors coincide (e.g. same-facing ports where the meet
+     * point lands on a stub) -- those caused overlapping draws, spurious
+     * draggable segments, and a degenerate arrowhead direction when the last
+     * two points collapsed onto each other.
+     */
+    private List<Point2D> simplify(List<Point2D> pts) {
+        List<Point2D> out = new ArrayList<>();
+        for (Point2D p : pts) {
+            // skip a point coincident with the previous one
+            if (!out.isEmpty() && near(out.get(out.size() - 1), p)) continue;
+            // drop the middle of three collinear points
+            if (out.size() >= 2) {
+                Point2D a = out.get(out.size() - 2), b = out.get(out.size() - 1);
+                if (collinear(a, b, p)) out.remove(out.size() - 1);
+            }
+            out.add(p);
+        }
+        if (out.size() < 2) out.add(pts.get(pts.size() - 1));  // keep at least 2 pts
         return out;
+    }
+
+    private static boolean near(Point2D a, Point2D b) {
+        return Math.abs(a.getX() - b.getX()) < 0.5 && Math.abs(a.getY() - b.getY()) < 0.5;
+    }
+
+    private static boolean collinear(Point2D a, Point2D b, Point2D c) {
+        boolean hor = Math.abs(a.getY() - b.getY()) < 0.5 && Math.abs(b.getY() - c.getY()) < 0.5;
+        boolean ver = Math.abs(a.getX() - b.getX()) < 0.5 && Math.abs(b.getX() - c.getX()) < 0.5;
+        return hor || ver;
     }
 
     /**
@@ -1068,7 +1166,7 @@ public class CanvasPanel extends JPanel {
         for (Block b : diagram.blocks) paintBlock(g2, b);
 
         if (rubber != null) {
-            g2.setColor(new Color(0xE8861A));
+            g2.setColor(theme.sel);
             g2.setStroke(new BasicStroke((float) (1 / scale), BasicStroke.CAP_BUTT,
                     BasicStroke.JOIN_MITER, 10, new float[]{4, 4}, 0));
             g2.draw(rubber);
@@ -1079,18 +1177,19 @@ public class CanvasPanel extends JPanel {
     private void paintGrid(Graphics2D g2) {
         Rectangle2D vis = new Rectangle2D.Double(-tx / scale, -ty / scale,
                 getWidth() / scale, getHeight() / scale);
-        g2.setColor(GRID);
+        g2.setColor(theme.grid);
         int step = 20;
+        double d = 1.6;  // dot diameter (model units)
         int x0 = (int) Math.floor(vis.getMinX() / step) * step;
         int y0 = (int) Math.floor(vis.getMinY() / step) * step;
         for (int x = x0; x < vis.getMaxX(); x += step)
             for (int y = y0; y < vis.getMaxY(); y += step)
-                g2.fillRect(x, y, 1, 1);
+                g2.fill(new Ellipse2D.Double(x - d / 2, y - d / 2, d, d));
     }
 
     private void paintWire(Graphics2D g2, Wire w) {
         boolean sel = selection.contains(w);
-        g2.setColor(sel ? SEL : WIRE);
+        g2.setColor(sel ? theme.sel : theme.wire);
         g2.setStroke(new BasicStroke(sel ? 2.4f : 1.8f,
                 BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
         List<Point2D> pts = route(w);
@@ -1116,7 +1215,7 @@ public class CanvasPanel extends JPanel {
         // bus width label near the source
         if (showBitWidths) {
             g2.setFont(g2.getFont().deriveFont(9f));
-            g2.setColor(new Color(0x9AA0AA));
+            g2.setColor(theme.busLabel);
             Point sp = portPos(w.src);
             g2.drawString(w.src.width + "b", sp.x + 4, sp.y - 4);
         }
@@ -1124,7 +1223,7 @@ public class CanvasPanel extends JPanel {
         // net name at wire midpoint
         if (showNetNames) {
             g2.setFont(g2.getFont().deriveFont(9f));
-            g2.setColor(new Color(0x5A6A7A));
+            g2.setColor(theme.netLabel);
             String netName = w.src.block.label() + "." + w.src.name;
             // Find midpoint of wire
             int midIdx = pts.size() / 2;
@@ -1134,7 +1233,7 @@ public class CanvasPanel extends JPanel {
 
         // Draw waypoint handles when selected and has custom routing
         if (sel && w.hasCustomRoute()) {
-            g2.setColor(SEL);
+            g2.setColor(theme.sel);
             for (Point wp : w.waypoints) {
                 g2.fillRect(wp.x - 3, wp.y - 3, 6, 6);
             }
@@ -1143,7 +1242,7 @@ public class CanvasPanel extends JPanel {
 
     private void paintPendingWire(Graphics2D g2) {
         Point a = portPos(wireFrom);
-        g2.setColor(SEL);
+        g2.setColor(theme.sel);
         g2.setStroke(new BasicStroke(1.6f, BasicStroke.CAP_BUTT, BasicStroke.JOIN_MITER,
                 10, new float[]{5, 4}, 0));
         g2.draw(new Line2D.Double(a.x, a.y, mouseModel.getX(), mouseModel.getY()));
@@ -1151,10 +1250,10 @@ public class CanvasPanel extends JPanel {
 
     private Color fillFor(Block b) {
         String t = b.type();
-        if (t.equals("Scope") || t.equals("Spectrum")) return new Color(0xE9F1FB);
-        if (t.equals("Constant") || t.equals("Impulse") || t.equals("Sine")) return new Color(0xFDF6E3);
-        if (t.equals("Clock")) return new Color(0xF3EAF8);
-        return Color.WHITE;
+        if (t.equals("Scope") || t.equals("Spectrum")) return theme.scopeFill;
+        if (t.equals("Constant") || t.equals("Impulse") || t.equals("Sine")) return theme.sourceFill;
+        if (t.equals("Clock")) return theme.clockFill;
+        return theme.blockFill;
     }
 
     private void paintBlock(Graphics2D g2, Block b) {
@@ -1167,16 +1266,16 @@ public class CanvasPanel extends JPanel {
         }
 
         Shape rr = new RoundRectangle2D.Double(b.x, b.y, b.w, b.h, 10, 10);
-        g2.setColor(new Color(0, 0, 0, 18));
+        g2.setColor(theme.shadow);
         g2.fill(new RoundRectangle2D.Double(b.x + 2, b.y + 3, b.w, b.h, 10, 10));
         g2.setColor(fillFor(b));
         g2.fill(rr);
-        g2.setColor(sel ? SEL : BORDER);
+        g2.setColor(sel ? theme.sel : theme.border);
         g2.setStroke(new BasicStroke(sel ? 2.2f : 1.2f));
         g2.draw(rr);
 
         // glyph
-        g2.setColor(new Color(0x2B3340));
+        g2.setColor(theme.glyph);
         g2.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 20));
         String gl = b.glyph();
         FontMetrics fm = g2.getFontMetrics();
@@ -1186,7 +1285,7 @@ public class CanvasPanel extends JPanel {
         // caption (block name)
         if (showBlockNames) {
             g2.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 10));
-            g2.setColor(new Color(0x6B7280));
+            g2.setColor(theme.caption);
             String lab = b.label();
             fm = g2.getFontMetrics();
             g2.drawString(lab, b.x + (b.w - fm.stringWidth(lab)) / 2, b.y + b.h + 13);
@@ -1197,27 +1296,24 @@ public class CanvasPanel extends JPanel {
         for (Port p : b.outputs) paintPort(g2, p, b);
     }
 
-    private static final Color NOTE_FILL = new Color(0xFFF9C4);  // light yellow
-    private static final Color NOTE_BORDER = new Color(0xF9A825);  // darker yellow
-
     private void paintStickyNote(Graphics2D g2, StickyNote note, boolean sel) {
         // Shadow
-        g2.setColor(new Color(0, 0, 0, 25));
+        g2.setColor(theme.shadow);
         g2.fill(new Rectangle2D.Double(note.x + 3, note.y + 3, note.w, note.h));
 
         // Fill
-        g2.setColor(NOTE_FILL);
+        g2.setColor(theme.noteFill);
         g2.fill(new Rectangle2D.Double(note.x, note.y, note.w, note.h));
 
         // Border
-        g2.setColor(sel ? SEL : NOTE_BORDER);
+        g2.setColor(sel ? theme.sel : theme.noteBorder);
         g2.setStroke(new BasicStroke(sel ? 2f : 1f));
         g2.draw(new Rectangle2D.Double(note.x, note.y, note.w, note.h));
 
         // Text with word wrap
         String text = note.text();
         if (!text.isEmpty()) {
-            g2.setColor(new Color(0x5D4037));  // brown text
+            g2.setColor(theme.noteText);
             g2.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 11));
             FontMetrics fm = g2.getFontMetrics();
             int lineH = fm.getHeight();
@@ -1259,15 +1355,11 @@ public class CanvasPanel extends JPanel {
         // Resize handle (bottom-right corner triangle)
         int hx = note.x + note.w;
         int hy = note.y + note.h;
-        g2.setColor(NOTE_BORDER);
+        g2.setColor(theme.noteBorder);
         int[] xpts = { hx - RESIZE_HANDLE, hx, hx };
         int[] ypts = { hy, hy - RESIZE_HANDLE, hy };
         g2.fillPolygon(xpts, ypts, 3);
     }
-
-    private static final Color PORT_INPUT = new Color(0x3B82F6);   // blue
-    private static final Color PORT_OUTPUT = new Color(0x22C55E);  // green
-    private static final Color PORT_CE = new Color(0x8E5BAE);      // purple
 
     private void paintPort(Graphics2D g2, Port p, Block b) {
         Point pos = portPos(p);
@@ -1276,13 +1368,13 @@ public class CanvasPanel extends JPanel {
 
         if (p.isCE()) {
             // CE port: purple filled circle
-            g2.setColor(hot ? SEL : PORT_CE);
+            g2.setColor(hot ? theme.sel : theme.portCE);
             g2.fillOval(pos.x - r, pos.y - r, 2 * r, 2 * r);
             g2.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 8));
             g2.drawString("ce", pos.x + 5, pos.y + 8);
         } else if (p.input) {
             // Input port: blue hollow circle
-            g2.setColor(hot ? SEL : PORT_INPUT);
+            g2.setColor(hot ? theme.sel : theme.portInput);
             g2.setStroke(new BasicStroke(1.5f));
             g2.drawOval(pos.x - r, pos.y - r, 2 * r, 2 * r);
             // Show signs for Sum block inputs
@@ -1298,18 +1390,18 @@ public class CanvasPanel extends JPanel {
             // Show port names for multi-input blocks (Scope, Spectrum)
             else if (hasMultipleInputs(b)) {
                 g2.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 9));
-                g2.setColor(new Color(0x6B7280));
+                g2.setColor(theme.label);
                 g2.drawString(p.name, pos.x + 10, pos.y + 4);
             }
         } else {
             // Output port: green filled circle
-            g2.setColor(hot ? SEL : PORT_OUTPUT);
+            g2.setColor(hot ? theme.sel : theme.portOutput);
             g2.fillOval(pos.x - r, pos.y - r, 2 * r, 2 * r);
         }
 
         // floating (unwired, non-CE) inputs get a subtle warning ring
         if (p.input && !p.isCE() && p.driver == null && !isWired(p)) {
-            g2.setColor(new Color(0xD05050));
+            g2.setColor(theme.portFloat);
             g2.setStroke(new BasicStroke(1f));
             g2.drawOval(pos.x - 7, pos.y - 7, 14, 14);
         }

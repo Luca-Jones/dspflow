@@ -73,6 +73,10 @@ public class MainFrame extends JFrame {
         JCheckBoxMenuItem netNames = new JCheckBoxMenuItem("Net names", false);
         netNames.addActionListener(e -> canvas.setShowNetNames(netNames.isSelected()));
         view.add(netNames);
+        view.addSeparator();
+        JCheckBoxMenuItem darkMode = new JCheckBoxMenuItem("Dark mode", false);
+        darkMode.addActionListener(e -> canvas.setDarkMode(darkMode.isSelected()));
+        view.add(darkMode);
         mb.add(view);
 
         JMenu help = new JMenu("Help");
