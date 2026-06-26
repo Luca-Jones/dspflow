@@ -20,6 +20,9 @@ public class SineSource extends Block {
         params.put("phase_deg", "0");
         params.put("cosine", "0");
         params.put("width", "16");
+        // Base clock rate in Hz; lets the dialog show an absolute signal
+        // frequency. ponytail: per-block, no model has a global rate.
+        params.put("sample_rate_hz", "48000");
         ce = in("ce");
         out = out("out");
         paramsChanged();
