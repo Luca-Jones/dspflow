@@ -266,7 +266,7 @@ public final class PlotViewer {
         for (int ch = 0; ch < ports.size(); ch++) {
             if (ch > 0) sb.append(',');
             sb.append('{');
-            kv(sb, "name", ports.get(ch).name).append(',');
+            kv(sb, "name", seriesName(ports.get(ch))).append(',');
             sb.append("\"y\":[");
             for (int i = 0; i < rows.size(); i++) {
                 if (i > 0) sb.append(',');
@@ -275,6 +275,16 @@ public final class PlotViewer {
             sb.append("]}");
         }
         return sb.append(']');
+    }
+
+    /**
+     * Label a sink input by the output port driving it (e.g. "my_block_1.out"),
+     * since the sink's own port names are just "in1", "in2". Falls back to the
+     * sink port name when the input is unconnected.
+     */
+    private static String seriesName(Port p) {
+        Port d = p.driver;
+        return d == null ? p.name : d.block.label() + "." + d.name;
     }
 
     private static StringBuilder kv(StringBuilder sb, String k, String v) {
