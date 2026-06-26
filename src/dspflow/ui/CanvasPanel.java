@@ -322,7 +322,41 @@ public class CanvasPanel extends JPanel {
         out.add(new Point2D.Double(a0.x, a0.y));
         out.addAll(chain);
         out.add(new Point2D.Double(b0.x, b0.y));
+        return simplify(out);
+    }
+
+    /**
+     * Collapse coincident points and merge collinear runs in an orthogonal
+     * polyline. Removes the zero-length and redundant segments produced when
+     * stub/corner anchors coincide (e.g. same-facing ports where the meet
+     * point lands on a stub) -- those caused overlapping draws, spurious
+     * draggable segments, and a degenerate arrowhead direction when the last
+     * two points collapsed onto each other.
+     */
+    private List<Point2D> simplify(List<Point2D> pts) {
+        List<Point2D> out = new ArrayList<>();
+        for (Point2D p : pts) {
+            // skip a point coincident with the previous one
+            if (!out.isEmpty() && near(out.get(out.size() - 1), p)) continue;
+            // drop the middle of three collinear points
+            if (out.size() >= 2) {
+                Point2D a = out.get(out.size() - 2), b = out.get(out.size() - 1);
+                if (collinear(a, b, p)) out.remove(out.size() - 1);
+            }
+            out.add(p);
+        }
+        if (out.size() < 2) out.add(pts.get(pts.size() - 1));  // keep at least 2 pts
         return out;
+    }
+
+    private static boolean near(Point2D a, Point2D b) {
+        return Math.abs(a.getX() - b.getX()) < 0.5 && Math.abs(a.getY() - b.getY()) < 0.5;
+    }
+
+    private static boolean collinear(Point2D a, Point2D b, Point2D c) {
+        boolean hor = Math.abs(a.getY() - b.getY()) < 0.5 && Math.abs(b.getY() - c.getY()) < 0.5;
+        boolean ver = Math.abs(a.getX() - b.getX()) < 0.5 && Math.abs(b.getX() - c.getX()) < 0.5;
+        return hor || ver;
     }
 
     /**
