@@ -106,20 +106,50 @@ public class PropertyDialog {
             row++;
         }
 
-        // Sine: live read-out of the absolute signal frequency, from the
-        // project clock. f = clockHz / period (Hz); 1/period cycles/sample.
+        // Sine: enter a frequency in Hz and infer period = round(clockHz / freq),
+        // using the project clock. period stays the stored param (engine uses it);
+        // frequency is a UI convenience. Editing either keeps the other in sync.
         if (b.type().equals("Sine")) {
             long clockHz = d.clockHz;
             JTextField period = fields.get("period");
+            JTextField freq = new JTextField(12);
+            c.gridx = 0; c.gridy = row; c.weightx = 0;
+            grid.add(new JLabel("frequency (Hz)"), c);
+            c.gridx = 1; c.weightx = 1;
+            grid.add(freq, c);
+            row++;
+
             JLabel readout = new JLabel();
-            Runnable update = () -> {
+            // Reentrancy guard: programmatic setText fires DocumentListeners too.
+            boolean[] sync = { false };
+            Runnable showReadout = () -> {
                 double p = Math.max(1e-9, parse(period.getText(), 1));
                 readout.setText(String.format(
-                        "signal freq: %.4g Hz   (%.4g cycles/sample)",
-                        clockHz / p, 1.0 / p));
+                        "f = %.6g Hz   period = %.6g samples   (%.4g cycles/sample)",
+                        clockHz / p, p, 1.0 / p));
             };
-            update.run();
-            period.getDocument().addDocumentListener(listener(update));
+            // freq -> period: round to integer samples, the engine's unit.
+            Runnable freqToPeriod = () -> {
+                if (sync[0]) return;
+                double f = parse(freq.getText(), 0);
+                if (f <= 0) { showReadout.run(); return; }
+                sync[0] = true;
+                period.setText(Long.toString(Math.max(1, Math.round(clockHz / f))));
+                sync[0] = false;
+                showReadout.run();
+            };
+            // period -> freq, for when the user edits period directly.
+            Runnable periodToFreq = () -> {
+                if (sync[0]) return;
+                double p = Math.max(1e-9, parse(period.getText(), 1));
+                sync[0] = true;
+                freq.setText(String.format("%.6g", clockHz / p));
+                sync[0] = false;
+                showReadout.run();
+            };
+            periodToFreq.run(); // seed frequency field from the current period
+            freq.getDocument().addDocumentListener(listener(freqToPeriod));
+            period.getDocument().addDocumentListener(listener(periodToFreq));
             c.gridx = 0; c.gridy = row; c.weightx = 1; c.gridwidth = 2;
             grid.add(readout, c);
             c.gridwidth = 1;
