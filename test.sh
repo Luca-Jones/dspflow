@@ -5,4 +5,8 @@ cd "$(dirname "$0")"
 mkdir -p out-test
 # Engine + model only; the UI (Swing) is not needed for engine tests.
 javac -d out-test $(find src test -name '*.java' ! -path '*/ui/*' ! -name 'Main.java')
-java -cp out-test dspflow.engine.EngineTest
+# EngineTest is optional (may not be present on every branch).
+if [ -f test/dspflow/engine/EngineTest.java ]; then
+  java -cp out-test dspflow.engine.EngineTest
+fi
+java -cp out-test dspflow.engine.GoldenTest

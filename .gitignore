@@ -6,3 +6,6 @@ out-test
 
 __pycache__/
 *.pyc
+
+# but golden test snapshots are checked in
+!test/golden/*.expected.csv
