@@ -23,7 +23,6 @@ public class PropertyDialog {
             case "fft_size": return "FFT size";
             case "hann": return "Hann Windowed";
             case "period": return "period (samples)";
-            case "sample_rate_hz": return "clock freq (Hz)";
             default: return key;
         }
     }
@@ -41,6 +40,15 @@ public class PropertyDialog {
     private static double parse(String s, double def) {
         try { return Double.parseDouble(s.trim()); }
         catch (NumberFormatException e) { return def; }
+    }
+
+    /** DocumentListener that runs the same action on any change. */
+    private static javax.swing.event.DocumentListener listener(Runnable r) {
+        return new javax.swing.event.DocumentListener() {
+            public void insertUpdate(javax.swing.event.DocumentEvent e) { r.run(); }
+            public void removeUpdate(javax.swing.event.DocumentEvent e) { r.run(); }
+            public void changedUpdate(javax.swing.event.DocumentEvent e) { r.run(); }
+        };
     }
 
     /** A stored param string is "true" when non-empty and not "0". */
@@ -98,26 +106,20 @@ public class PropertyDialog {
             row++;
         }
 
-        // Sine: live read-out of the absolute signal frequency.
-        // f = sample_rate / period (Hz); normalized = 1/period cycles/sample.
+        // Sine: live read-out of the absolute signal frequency, from the
+        // project clock. f = clockHz / period (Hz); 1/period cycles/sample.
         if (b.type().equals("Sine")) {
+            long clockHz = d.clockHz;
+            JTextField period = fields.get("period");
             JLabel readout = new JLabel();
             Runnable update = () -> {
-                double period = parse(fields.get("period").getText(), 1);
-                double rate = parse(fields.get("sample_rate_hz").getText(), 0);
-                if (period <= 0) period = 1e-9;
+                double p = Math.max(1e-9, parse(period.getText(), 1));
                 readout.setText(String.format(
                         "signal freq: %.4g Hz   (%.4g cycles/sample)",
-                        rate / period, 1.0 / period));
+                        clockHz / p, 1.0 / p));
             };
             update.run();
-            javax.swing.event.DocumentListener dl = new javax.swing.event.DocumentListener() {
-                public void insertUpdate(javax.swing.event.DocumentEvent e) { update.run(); }
-                public void removeUpdate(javax.swing.event.DocumentEvent e) { update.run(); }
-                public void changedUpdate(javax.swing.event.DocumentEvent e) { update.run(); }
-            };
-            fields.get("period").getDocument().addDocumentListener(dl);
-            fields.get("sample_rate_hz").getDocument().addDocumentListener(dl);
+            period.getDocument().addDocumentListener(listener(update));
             c.gridx = 0; c.gridy = row; c.weightx = 1; c.gridwidth = 2;
             grid.add(readout, c);
             c.gridwidth = 1;

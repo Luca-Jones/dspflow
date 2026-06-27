@@ -62,6 +62,10 @@ public class MainFrame extends JFrame {
         sim.add(item("Run", KeyEvent.VK_R, e -> runSim()));
         mb.add(sim);
 
+        JMenu edit = new JMenu("Edit");
+        edit.add(item("Clock frequency…", 0, e -> editClock()));
+        mb.add(edit);
+
         JMenu view = new JMenu("View");
         view.add(item("Reset view", 0, e -> { canvas.resetView(); setZoomLabel("100%"); }));
         view.addSeparator();
@@ -231,6 +235,21 @@ public class MainFrame extends JFrame {
         } catch (PlotViewer.PlotException ex) {
             JOptionPane.showMessageDialog(this, ex.getMessage(),
                     "Could not plot", JOptionPane.ERROR_MESSAGE);
+        }
+    }
+
+    private void editClock() {
+        String s = JOptionPane.showInputDialog(this,
+                "Project clock frequency (Hz):", diagram.clockHz);
+        if (s == null) return;
+        try {
+            long hz = Long.parseLong(s.trim());
+            if (hz <= 0) throw new NumberFormatException();
+            diagram.clockHz = hz;
+            setStatus("Clock = " + hz + " Hz.");
+        } catch (NumberFormatException ex) {
+            JOptionPane.showMessageDialog(this, "Enter a positive integer.",
+                    "Bad clock frequency", JOptionPane.ERROR_MESSAGE);
         }
     }
 

@@ -10,6 +10,10 @@ public class Diagram {
     public final List<Wire> wires = new ArrayList<>();
     public int nextId = 1;
 
+    /** Project-level absolute clock frequency (Hz). One source of truth for
+     *  all blocks; the Sine dialog uses it to convert period <-> frequency. */
+    public long clockHz = 10_000_000;
+
     public void add(Block b) {
         b.id = nextId++;
         b.displayNum = nextDisplayNum(b.type());
@@ -77,6 +81,7 @@ public class Diagram {
         try (PrintWriter pw = new PrintWriter(new OutputStreamWriter(
                 new FileOutputStream(f), StandardCharsets.UTF_8))) {
             pw.println("DSPFLOW 1");
+            pw.println("CLOCK " + clockHz);
             for (Block b : blocks) {
                 pw.println("BLOCK " + b.type() + " " + b.id + " " + b.x + " " + b.y
                         + " " + b.w + " " + b.h
@@ -105,6 +110,12 @@ public class Diagram {
             while ((line = br.readLine()) != null) {
                 line = line.trim();
                 if (line.isEmpty() || line.startsWith("#") || line.startsWith("DSPFLOW")) continue;
+                if (line.startsWith("CLOCK ")) {
+                    // ponytail: old files lack this line and keep the 10MHz default.
+                    try { d.clockHz = Long.parseLong(line.substring(6).trim()); }
+                    catch (NumberFormatException ignore) {}
+                    continue;
+                }
                 if (line.startsWith("BLOCK ")) {
                     String[] t = line.split("\\s+");
                     cur = BlockLibrary.create(t[1]);
